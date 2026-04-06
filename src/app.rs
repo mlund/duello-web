@@ -248,6 +248,10 @@ impl DuelloApp {
                     egui::DragValue::new(&mut self.inputs.ph)
                         .speed(0.1)
                         .range(0.0..=14.0),
+                )
+                .on_hover_text(
+                    "Determines the average ionization state of titratable groups \
+                    and N/C terminal ends using Metropolis GCMC swap moves.",
                 );
                 ui.end_row();
 
@@ -257,6 +261,11 @@ impl DuelloApp {
                         .speed(0.01)
                         .suffix(" M")
                         .range(0.0..=10.0),
+                )
+                .on_hover_text(
+                    "Sets the Debye screening length used in both the Monte Carlo \
+                    titration of ionizable groups and in the intermolecular \
+                    protein-protein interaction energy via the Yukawa potential.",
                 );
                 ui.end_row();
 
@@ -266,6 +275,10 @@ impl DuelloApp {
                         .speed(1.0)
                         .suffix(" K")
                         .range(1.0..=1000.0),
+                )
+                .on_hover_text(
+                    "Affects the thermal energy used in Boltzmann averaging \
+                    and the dielectric constant of water.",
                 );
                 ui.end_row();
             });
@@ -287,6 +300,12 @@ impl DuelloApp {
                     egui::DragValue::new(&mut self.inputs.rmin)
                         .speed(0.5)
                         .suffix(" \u{00C5}"),
+                )
+                .on_hover_text(
+                    "Minimum sampled center of mass separation between the proteins. \
+                    Below this value we assume infinite repulsion in the osmotic second \
+                    virial coefficient, B\u{2082}. Directly affects the reduced virial \
+                    coefficient so pay attention when comparing with experiment or other models.",
                 );
                 ui.end_row();
 
@@ -573,8 +592,25 @@ impl DuelloApp {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let _ = tx; // not implemented on native
-            log::warn!("PDB fetch not yet implemented on native desktop");
+            std::thread::spawn(move || {
+                let url = format!("https://files.rcsb.org/download/{pdb_id}.pdb");
+                match ureq::get(&url).call() {
+                    Ok(response) => {
+                        let mut data = Vec::new();
+                        if std::io::Read::read_to_end(
+                            &mut response.into_body().as_reader(),
+                            &mut data,
+                        )
+                        .is_ok()
+                        {
+                            let _ = tx.send((mol_num, format!("{pdb_id}.pdb"), data));
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to fetch PDB {pdb_id}: {e}");
+                    }
+                }
+            });
         }
     }
 
