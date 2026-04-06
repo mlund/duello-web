@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Duello</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #1a1a1a;
+        }
+        #duello_canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <!-- eframe needs the canvas to have width/height attributes for WebGPU surface -->
+    <canvas id="duello_canvas" width="1024" height="720"></canvas>
+    <script>
+        // Resize canvas to match window
+        function resize() {
+            const c = document.getElementById("duello_canvas");
+            c.width = window.innerWidth;
+            c.height = window.innerHeight;
+        }
+        window.addEventListener("resize", resize);
+        resize();
+    </script>
+</body>
+</html>

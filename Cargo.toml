@@ -1,0 +1,29 @@
+[package]
+name = "duello-web"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+duello = { path = "../duello", default-features = false }
+eframe = { version = "0.34", default-features = false, features = ["wgpu"] }
+egui_plot = "0.35"
+egui = "0.34"
+rfd = "0.15"
+log = "0.4"
+anyhow = "1.0"
+pollster = "0.4"
+faunus = { git = "https://github.com/mlund/faunus-rs.git", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
+web-time = "1"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Blob", "Url", "HtmlAnchorElement", "HtmlCanvasElement", "Document", "Window", "Response"] }
+console_log = "1"
+console_error_panic_hook = "0.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.11"
