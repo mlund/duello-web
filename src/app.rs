@@ -408,6 +408,7 @@ impl DuelloApp {
 
             Plot::new("pmf_plot")
                 .legend(egui_plot::Legend::default())
+                .auto_bounds(egui::Vec2b::TRUE)
                 .x_axis_label("Center of mass separation, R (\u{00C5})")
                 .y_axis_label("Energy (kT)")
                 .show(ui, |plot_ui| {
