@@ -28,7 +28,10 @@ rustup target add wasm32-unknown-unknown
 trunk serve
 ```
 
-Opens at http://127.0.0.1:8080/.
+Opens at http://127.0.0.1:8080/. Use `trunk serve --release` for an optimized build.
+
+> **Safari users:** Use `http://127.0.0.1:8080/` (not `localhost`).
+> Safari requires a secure context for WebGPU, and `127.0.0.1` is treated as secure while `localhost` is not.
 
 ## Features
 
