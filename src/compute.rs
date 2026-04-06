@@ -1,7 +1,7 @@
 use crate::app::{CgPolicy, ScanInputs};
 use duello::web_api::{WebScanRequest, WebScanResult};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+#[cfg(target_arch = "wasm32")]
+use std::sync::{atomic::AtomicBool, Arc};
 
 /// Status of the computation.
 pub enum ComputeStatus {

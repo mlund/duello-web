@@ -1,8 +1,8 @@
 use crate::compute::{ComputeResult, ComputeStatus};
 use egui_plot::{Line, MarkerShape, Plot, Points};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Force field model choices.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,8 +91,16 @@ struct PlotCache {
 impl PlotCache {
     fn from_result(result: &ComputeResult) -> Self {
         Self {
-            pmf: result.pmf_data.iter().map(|&(r, f)| [r as f64, f as f64]).collect(),
-            mean_energy: result.mean_energy_data.iter().map(|&(r, u)| [r as f64, u as f64]).collect(),
+            pmf: result
+                .pmf_data
+                .iter()
+                .map(|&(r, f)| [r as f64, f as f64])
+                .collect(),
+            mean_energy: result
+                .mean_energy_data
+                .iter()
+                .map(|&(r, u)| [r as f64, u as f64])
+                .collect(),
         }
     }
 }
@@ -233,15 +241,29 @@ impl DuelloApp {
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
                 ui.label("pH");
-                ui.add(egui::DragValue::new(&mut self.inputs.ph).speed(0.1).range(0.0..=14.0));
+                ui.add(
+                    egui::DragValue::new(&mut self.inputs.ph)
+                        .speed(0.1)
+                        .range(0.0..=14.0),
+                );
                 ui.end_row();
 
                 ui.label("Ionic strength");
-                ui.add(egui::DragValue::new(&mut self.inputs.molarity).speed(0.01).suffix(" M").range(0.0..=10.0));
+                ui.add(
+                    egui::DragValue::new(&mut self.inputs.molarity)
+                        .speed(0.01)
+                        .suffix(" M")
+                        .range(0.0..=10.0),
+                );
                 ui.end_row();
 
                 ui.label("Temperature");
-                ui.add(egui::DragValue::new(&mut self.inputs.temperature).speed(1.0).suffix(" K").range(1.0..=1000.0));
+                ui.add(
+                    egui::DragValue::new(&mut self.inputs.temperature)
+                        .speed(1.0)
+                        .suffix(" K")
+                        .range(1.0..=1000.0),
+                );
                 ui.end_row();
             });
 
@@ -258,15 +280,28 @@ impl DuelloApp {
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
                 ui.label("R min");
-                ui.add(egui::DragValue::new(&mut self.inputs.rmin).speed(0.5).suffix(" \u{00C5}"));
+                ui.add(
+                    egui::DragValue::new(&mut self.inputs.rmin)
+                        .speed(0.5)
+                        .suffix(" \u{00C5}"),
+                );
                 ui.end_row();
 
                 ui.label("R max");
-                ui.add(egui::DragValue::new(&mut self.inputs.rmax).speed(0.5).suffix(" \u{00C5}"));
+                ui.add(
+                    egui::DragValue::new(&mut self.inputs.rmax)
+                        .speed(0.5)
+                        .suffix(" \u{00C5}"),
+                );
                 ui.end_row();
 
                 ui.label("\u{0394}R");
-                ui.add(egui::DragValue::new(&mut self.inputs.dr).speed(0.1).suffix(" \u{00C5}").range(0.1..=10.0));
+                ui.add(
+                    egui::DragValue::new(&mut self.inputs.dr)
+                        .speed(0.1)
+                        .suffix(" \u{00C5}")
+                        .range(0.1..=10.0),
+                );
                 ui.end_row();
             });
 
@@ -275,9 +310,11 @@ impl DuelloApp {
         // --- Resolution ---
         ui.label("Angular resolution");
         ui.add(egui::Slider::new(&mut self.inputs.max_ndiv, 0..=4))
-            .on_hover_text("Number of icosphere subdivisions controlling the angular resolution. \
+            .on_hover_text(
+                "Number of icosphere subdivisions controlling the angular resolution. \
                 Zero means 12 vertices on the regular icosahedron; each subdivision \
-                increases the number of angular samples.");
+                increases the number of angular samples.",
+            );
 
         ui.add_space(6.0);
 
@@ -290,15 +327,28 @@ impl DuelloApp {
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
                         ui.label("Cutoff");
-                        ui.add(egui::DragValue::new(&mut self.inputs.cutoff).speed(1.0).suffix(" \u{00C5}").range(1.0..=500.0));
+                        ui.add(
+                            egui::DragValue::new(&mut self.inputs.cutoff)
+                                .speed(1.0)
+                                .suffix(" \u{00C5}")
+                                .range(1.0..=500.0),
+                        );
                         ui.end_row();
 
                         ui.label("Gradient threshold");
-                        ui.add(egui::DragValue::new(&mut self.inputs.gradient_threshold).speed(0.1).range(0.0..=10.0));
+                        ui.add(
+                            egui::DragValue::new(&mut self.inputs.gradient_threshold)
+                                .speed(0.1)
+                                .range(0.0..=10.0),
+                        );
                         ui.end_row();
 
                         ui.label("Spline grid size");
-                        ui.add(egui::DragValue::new(&mut self.inputs.grid_size).speed(10).range(50..=1000));
+                        ui.add(
+                            egui::DragValue::new(&mut self.inputs.grid_size)
+                                .speed(10)
+                                .range(50..=1000),
+                        );
                         ui.end_row();
                     });
             });
@@ -327,16 +377,18 @@ impl DuelloApp {
             && self.gpu_available;
 
         ui.horizontal(|ui| {
-            if ui.add_enabled(can_run, egui::Button::new("Run scan")).clicked() {
+            if ui
+                .add_enabled(can_run, egui::Button::new("Run scan"))
+                .clicked()
+            {
                 self.start_scan();
             }
-            if matches!(self.status, ComputeStatus::Running { .. }) {
-                if ui.button("Cancel").clicked() {
-                    self.cancel_flag.store(true, Ordering::Relaxed);
-                    self.status = ComputeStatus::Idle;
-                    self.result_rx = None;
-                    self.progress_rx = None;
-                }
+            if matches!(self.status, ComputeStatus::Running { .. }) && ui.button("Cancel").clicked()
+            {
+                self.cancel_flag.store(true, Ordering::Relaxed);
+                self.status = ComputeStatus::Idle;
+                self.result_rx = None;
+                self.progress_rx = None;
             }
         });
     }
@@ -359,7 +411,11 @@ impl DuelloApp {
                 .x_axis_label("Center of mass separation, R (\u{00C5})")
                 .y_axis_label("Energy (kT)")
                 .show(ui, |plot_ui| {
-                    plot_ui.line(Line::new("Free energy", cache.pmf.clone()).color(blue).width(2.0));
+                    plot_ui.line(
+                        Line::new("Free energy", cache.pmf.clone())
+                            .color(blue)
+                            .width(2.0),
+                    );
                     plot_ui.points(
                         Points::new("", cache.pmf.clone())
                             .color(blue)
@@ -367,7 +423,11 @@ impl DuelloApp {
                             .radius(3.0),
                     );
 
-                    plot_ui.line(Line::new("Average energy", cache.mean_energy.clone()).color(red).width(2.0));
+                    plot_ui.line(
+                        Line::new("Average energy", cache.mean_energy.clone())
+                            .color(red)
+                            .width(2.0),
+                    );
                     plot_ui.points(
                         Points::new("", cache.mean_energy.clone())
                             .color(red)
@@ -464,7 +524,10 @@ impl DuelloApp {
                     .desired_width(50.0),
             );
             let id_valid = pdb_id.len() == 4 && pdb_id.chars().all(|c| c.is_alphanumeric());
-            if ui.add_enabled(id_valid, egui::Button::new("Fetch")).clicked() {
+            if ui
+                .add_enabled(id_valid, egui::Button::new("Fetch"))
+                .clicked()
+            {
                 action = MolAction::FetchPdb;
             }
         });
@@ -660,10 +723,7 @@ impl DuelloApp {
     fn download_string(&self, content: &str, filename: &str) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some(path) = rfd::FileDialog::new()
-                .set_file_name(filename)
-                .save_file()
-            {
+            if let Some(path) = rfd::FileDialog::new().set_file_name(filename).save_file() {
                 if let Err(e) = std::fs::write(&path, content) {
                     log::error!("Failed to save {filename}: {e}");
                 }
@@ -684,10 +744,7 @@ impl DuelloApp {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let Some(path) = rfd::FileDialog::new()
-                .set_file_name("pmf.csv")
-                .save_file()
-            {
+            if let Some(path) = rfd::FileDialog::new().set_file_name("pmf.csv").save_file() {
                 if let Err(e) = std::fs::write(&path, &csv) {
                     log::error!("Failed to save CSV: {e}");
                 }
@@ -737,11 +794,7 @@ fn download_string_as_file(content: &str, filename: &str) {
     ))
     .unwrap();
     let url = web_sys::Url::create_object_url_with_blob(&blob).unwrap();
-    let a: web_sys::HtmlAnchorElement = document
-        .create_element("a")
-        .unwrap()
-        .dyn_into()
-        .unwrap();
+    let a: web_sys::HtmlAnchorElement = document.create_element("a").unwrap().dyn_into().unwrap();
     a.set_href(&url);
     a.set_download(filename);
     a.click();
