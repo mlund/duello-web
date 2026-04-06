@@ -122,6 +122,8 @@ pub struct DuelloApp {
     result: Option<ComputeResult>,
     /// Cached plot data (computed once from result, reused each frame).
     plot_cache: Option<PlotCache>,
+    /// Set to true when new results arrive, consumed on next plot render.
+    plot_needs_reset: bool,
     error: Option<String>,
     gpu_available: bool,
     /// Channel for receiving results from background scan thread.
@@ -154,6 +156,7 @@ impl DuelloApp {
             status: ComputeStatus::Idle,
             result: None,
             plot_cache: None,
+            plot_needs_reset: false,
             error: if gpu_available {
                 None
             } else {
@@ -393,7 +396,7 @@ impl DuelloApp {
         });
     }
 
-    fn ui_center_panel(&self, ui: &mut egui::Ui, is_dark: bool) {
+    fn ui_center_panel(&mut self, ui: &mut egui::Ui, is_dark: bool) {
         if let Some(cache) = &self.plot_cache {
             let blue = if is_dark {
                 egui::Color32::from_rgb(100, 150, 255)
@@ -406,11 +409,16 @@ impl DuelloApp {
                 egui::Color32::from_rgb(200, 40, 30)
             };
 
-            Plot::new("pmf_plot")
+            let mut plot = Plot::new("pmf_plot")
                 .legend(egui_plot::Legend::default())
                 .auto_bounds(egui::Vec2b::TRUE)
                 .x_axis_label("Center of mass separation, R (\u{00C5})")
-                .y_axis_label("Energy (kT)")
+                .y_axis_label("Energy (kT)");
+            if self.plot_needs_reset {
+                plot = plot.reset();
+                self.plot_needs_reset = false;
+            }
+            plot
                 .show(ui, |plot_ui| {
                     plot_ui.line(
                         Line::new("Free energy", cache.pmf.clone())
@@ -699,6 +707,7 @@ impl DuelloApp {
             match rx.try_recv() {
                 Ok(Ok(result)) => {
                     self.plot_cache = Some(PlotCache::from_result(&result));
+                    self.plot_needs_reset = true;
                     self.result = Some(result);
                     self.status = ComputeStatus::Idle;
                     self.result_rx = None;
