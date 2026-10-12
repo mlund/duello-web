@@ -4,12 +4,16 @@ name: Deploy to GitHub Pages
 # serves the exact bytes it was released with. The site is reassembled from those
 # assets on every deploy: /duello-web/vX.Y.Z/ per release, versions.json, and a root
 # redirect to the newest. Run manually to reassemble without a new release.
+#
+# The github-pages environment only accepts deploys from main, so a tag run builds
+# and then dispatches this workflow on main to assemble and deploy.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   pages: write
   id-token: write
@@ -55,9 +59,11 @@ jobs:
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Web build; open at https://mlund.github.io/duello-web/$GITHUB_REF_NAME/"
           gh release upload "$GITHUB_REF_NAME" "site-$GITHUB_REF_NAME.zip" --clobber
 
+      - name: Deploy from main
+        run: gh workflow run deploy.yml --ref main
+
   assemble:
-    needs: build
-    if: ${{ !failure() && !cancelled() }}
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
     steps:
       - name: Collect release builds
