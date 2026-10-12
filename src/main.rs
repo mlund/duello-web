@@ -1,5 +1,6 @@
 mod app;
 mod compute;
+mod version;
 
 fn main() -> eframe::Result {
     #[cfg(not(target_arch = "wasm32"))]

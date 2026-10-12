@@ -8,6 +8,16 @@ Browser-based GUI for [Duello](https://github.com/mlund/duello) -- compute osmot
 
 Visit **https://mlund.github.io/duello-web/** (requires a WebGPU-capable browser: Chrome 113+, Edge 113+, or Safari 18+).
 
+This opens the newest release. Every release stays available, unchanged, at
+`https://mlund.github.io/duello-web/vX.Y.Z/` for reproducing earlier results; switch
+with the version menu in the app.
+
+## Releasing
+
+Set `version` in `Cargo.toml`, commit, and push a matching tag (`vX.Y.Z`). The deploy
+workflow builds that tag once, attaches the build to the GitHub release, and republishes
+the site with all releases.
+
 ## Run Locally
 
 ### Native Desktop App

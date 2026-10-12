@@ -1,25 +1,37 @@
 name: Deploy to GitHub Pages
 
+# Each tag is built once and its `dist` kept as a release asset, so an old version
+# serves the exact bytes it was released with. The site is reassembled from those
+# assets on every deploy: /duello-web/vX.Y.Z/ per release, versions.json, and a root
+# redirect to the newest. Run manually to reassemble without a new release.
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
 
 jobs:
   build:
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Tag must match Cargo.toml version
+        run: test "v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" = "$GITHUB_REF_NAME"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -29,16 +41,55 @@ jobs:
       - name: Install Trunk
         uses: jetli/trunk-action@v0.5.1
 
+      # Fails if Cargo.lock is stale, so the release is the locked dependency set.
+      - name: Check lockfile
+        run: cargo fetch --locked
+
       - name: Build
-        run: trunk build --release --public-url /duello-web/
+        run: trunk build --release --public-url "/duello-web/$GITHUB_REF_NAME/"
+
+      - name: Attach build to release
+        run: |
+          (cd dist && zip -qr "../site-$GITHUB_REF_NAME.zip" .)
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Web build; open at https://mlund.github.io/duello-web/$GITHUB_REF_NAME/"
+          gh release upload "$GITHUB_REF_NAME" "site-$GITHUB_REF_NAME.zip" --clobber
+
+  assemble:
+    needs: build
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect release builds
+        run: |
+          mkdir -p site
+          for tag in $(gh release list --limit 200 --json tagName -q '.[].tagName'); do
+            gh release download "$tag" -p "site-$tag.zip" -D zips 2>/dev/null || continue
+            unzip -q "zips/site-$tag.zip" -d "site/$tag"
+          done
+          ls site | grep -q . || { echo "no release builds found"; exit 1; }
+
+      - name: Write versions.json and root redirect
+        run: |
+          versions=$(ls site | grep '^v' | sort -rV)
+          latest=$(echo "$versions" | head -1)
+          echo "$versions" | jq -R . | jq -s . > site/versions.json
+          cat > site/index.html <<EOF
+          <!DOCTYPE html>
+          <meta charset="utf-8">
+          <meta http-equiv="refresh" content="0; url=$latest/">
+          <title>Duello</title>
+          <a href="$latest/">Duello $latest</a>
+          EOF
+          cat site/versions.json
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: site
 
   deploy:
-    needs: build
+    needs: assemble
     runs-on: ubuntu-latest
     environment:
       name: github-pages
