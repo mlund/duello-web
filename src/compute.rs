@@ -1,7 +1,6 @@
 use crate::app::{CgPolicy, ScanInputs};
-use duello::web_api::{WebScanRequest, WebScanResult};
-#[cfg(target_arch = "wasm32")]
-use std::sync::{atomic::AtomicBool, Arc};
+use duello::web_api::{ScanProgress, WebScanRequest, WebScanResult};
+use std::ops::ControlFlow;
 
 /// Status of the computation.
 pub enum ComputeStatus {
@@ -38,8 +37,9 @@ pub fn run_scan_blocking(
     inputs: &ScanInputs,
     mol1_pdb: Vec<u8>,
     mol2_pdb: Vec<u8>,
+    progress: impl Fn(ScanProgress) -> ControlFlow<()>,
 ) -> anyhow::Result<ComputeResult> {
-    duello::web_api::run_scan(build_request(inputs, mol1_pdb, mol2_pdb))
+    duello::web_api::run_scan(build_request(inputs, mol1_pdb, mol2_pdb), Some(&progress))
 }
 
 /// Run the full scan pipeline asynchronously (for WASM).
@@ -48,13 +48,8 @@ pub async fn run_scan_async(
     inputs: ScanInputs,
     mol1_pdb: Vec<u8>,
     mol2_pdb: Vec<u8>,
-    progress: impl Fn(usize, usize),
-    cancel: Arc<AtomicBool>,
+    progress: impl Fn(ScanProgress) -> ControlFlow<()>,
 ) -> anyhow::Result<ComputeResult> {
-    duello::web_api::run_scan_async(
-        build_request(&inputs, mol1_pdb, mol2_pdb),
-        Some(&progress),
-        Some(&cancel),
-    )
-    .await
+    duello::web_api::run_scan_async(build_request(&inputs, mol1_pdb, mol2_pdb), Some(&progress))
+        .await
 }

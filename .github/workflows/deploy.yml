@@ -18,8 +18,10 @@ permissions:
   pages: write
   id-token: write
 
+# Per ref: tag builds never wait on or replace each other, while a queued deploy on
+# main is superseded by a newer one, which assembles the same releases anyway.
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -42,6 +44,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Install Trunk
         uses: jetli/trunk-action@v0.5.1
 
@@ -55,7 +59,7 @@ jobs:
       # Read by the HTML header, which must work without the wasm app.
       - name: Write build-info.json
         run: |
-          duello=$(awk '$0 == "name = \"duello\"" { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+          duello=$(cargo metadata --format-version 1 --locked | jq -r '.packages[] | select(.name == "duello") | .version')
           test -n "$duello"
           jq -n --arg web "$GITHUB_REF_NAME" --arg duello "$duello" '{web: $web, duello: $duello}' > dist/build-info.json
           cat dist/build-info.json
@@ -85,15 +89,16 @@ jobs:
 
       - name: Write versions.json and root redirect
         run: |
-          versions=$(ls site | grep '^v' | sort -rV)
-          latest=$(echo "$versions" | head -1)
+          # `~` sorts before everything, so v1.0.0-rc1 lands below v1.0.0.
+          versions=$(ls site | grep '^v' | sed 's/-/~/' | sort -rV | sed 's/~/-/')
+          latest=$(echo "$versions" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
           echo "$versions" | jq -R . | jq -s . > site/versions.json
           cat > site/index.html <<EOF
           <!DOCTYPE html>
           <meta charset="utf-8">
           <meta http-equiv="refresh" content="0; url=$latest/">
-          <title>Duello</title>
-          <a href="$latest/">Duello $latest</a>
+          <title>DuelloWeb</title>
+          <a href="$latest/">DuelloWeb $latest</a>
           EOF
           cat site/versions.json
 

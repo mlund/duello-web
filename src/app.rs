@@ -1,5 +1,7 @@
 use crate::compute::{ComputeResult, ComputeStatus};
-use egui_plot::{Line, MarkerShape, Plot, Points};
+use duello::web_api::{PmfPoint, ScanProgress};
+use egui_plot::{Line, MarkerShape, Plot, PlotPoint, Points};
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -82,26 +84,29 @@ enum MolAction {
     FetchPdb,
 }
 
-/// Pre-computed plot data to avoid per-frame conversion.
+/// Plot data in egui_plot's own type, so frames borrow it instead of converting.
+/// Filled point by point while a scan runs, then replaced by the final result.
+#[derive(Default)]
 struct PlotCache {
-    pmf: Vec<[f64; 2]>,
-    mean_energy: Vec<[f64; 2]>,
+    pmf: Vec<PlotPoint>,
+    mean_energy: Vec<PlotPoint>,
+    /// -TS = F - U, the entropic part of the free energy.
+    entropy: Vec<PlotPoint>,
 }
 
 impl PlotCache {
     fn from_result(result: &ComputeResult) -> Self {
-        Self {
-            pmf: result
-                .pmf_data
-                .iter()
-                .map(|&(r, f)| [r as f64, f as f64])
-                .collect(),
-            mean_energy: result
-                .mean_energy_data
-                .iter()
-                .map(|&(r, u)| [r as f64, u as f64])
-                .collect(),
-        }
+        let mut cache = Self::default();
+        result.points.iter().for_each(|&p| cache.push(p));
+        cache
+    }
+
+    fn push(&mut self, p: PmfPoint) {
+        let r = p.r as f64;
+        let (f, u) = (p.free_energy as f64, p.mean_energy as f64);
+        self.pmf.push(PlotPoint::new(r, f));
+        self.mean_energy.push(PlotPoint::new(r, u));
+        self.entropy.push(PlotPoint::new(r, f - u));
     }
 }
 
@@ -128,8 +133,8 @@ pub struct DuelloApp {
     gpu_available: bool,
     /// Channel for receiving results from background scan thread.
     result_rx: Option<mpsc::Receiver<anyhow::Result<ComputeResult>>>,
-    /// Channel for receiving progress updates (current_r, total_r).
-    progress_rx: Option<mpsc::Receiver<(usize, usize)>>,
+    /// Progress and PMF points, one message per finished R-bin.
+    progress_rx: Option<mpsc::Receiver<ScanProgress>>,
     /// Flag to signal cancellation to the running scan.
     cancel_flag: Arc<AtomicBool>,
     /// Channel for receiving file uploads (mol_num, name, data).
@@ -411,65 +416,67 @@ impl DuelloApp {
             if matches!(self.status, ComputeStatus::Running { .. }) && ui.button("Cancel").clicked()
             {
                 self.cancel_flag.store(true, Ordering::Relaxed);
-                self.status = ComputeStatus::Idle;
-                self.result_rx = None;
-                self.progress_rx = None;
+                self.abandon_scan();
             }
         });
     }
 
     fn ui_center_panel(&mut self, ui: &mut egui::Ui, is_dark: bool) {
-        if let Some(cache) = &self.plot_cache {
-            let blue = if is_dark {
-                egui::Color32::from_rgb(100, 150, 255)
-            } else {
-                egui::Color32::from_rgb(30, 60, 180)
-            };
-            let red = if is_dark {
-                egui::Color32::from_rgb(255, 120, 100)
-            } else {
-                egui::Color32::from_rgb(200, 40, 30)
-            };
-
-            let mut plot = Plot::new("pmf_plot")
-                .legend(egui_plot::Legend::default())
-                .auto_bounds(egui::Vec2b::TRUE)
-                .x_axis_label("Center of mass separation, R (\u{00C5})")
-                .y_axis_label("Energy (kT)");
-            if self.plot_needs_reset {
-                plot = plot.reset();
-                self.plot_needs_reset = false;
-            }
-            plot.show(ui, |plot_ui| {
-                plot_ui.line(
-                    Line::new("Free energy", cache.pmf.clone())
-                        .color(blue)
-                        .width(2.0_f32),
-                );
-                plot_ui.points(
-                    Points::new("", cache.pmf.clone())
-                        .color(blue)
-                        .shape(MarkerShape::Circle)
-                        .radius(3.0_f32),
-                );
-
-                plot_ui.line(
-                    Line::new("Average energy", cache.mean_energy.clone())
-                        .color(red)
-                        .width(2.0_f32),
-                );
-                plot_ui.points(
-                    Points::new("", cache.mean_energy.clone())
-                        .color(red)
-                        .shape(MarkerShape::Diamond)
-                        .radius(3.0_f32),
-                );
-            });
-        } else {
+        let Some(cache) = &self.plot_cache else {
             ui.centered_and_justified(|ui| {
                 ui.label("Upload PDB files and run a scan to see the PMF plot.");
             });
+            return;
+        };
+        let rgb = |dark: (u8, u8, u8), light: (u8, u8, u8)| {
+            let (r, g, b) = if is_dark { dark } else { light };
+            egui::Color32::from_rgb(r, g, b)
+        };
+        let series = [
+            (
+                "Free energy",
+                &cache.pmf,
+                rgb((100, 150, 255), (30, 60, 180)),
+                MarkerShape::Circle,
+            ),
+            (
+                "Average energy",
+                &cache.mean_energy,
+                rgb((255, 120, 100), (200, 40, 30)),
+                MarkerShape::Diamond,
+            ),
+            (
+                "Entropy (\u{2212}TS)",
+                &cache.entropy,
+                rgb((110, 200, 120), (30, 130, 50)),
+                MarkerShape::Square,
+            ),
+        ];
+
+        let mut plot = Plot::new("pmf_plot")
+            .legend(egui_plot::Legend::default())
+            .auto_bounds(egui::Vec2b::TRUE)
+            .x_axis_label("Center of mass separation, R (\u{00C5})")
+            .y_axis_label("Energy (kT)");
+        // Reset only when a scan starts or ends; auto_bounds follows the growing curve
+        // in between, so the user can still zoom while it runs.
+        if self.plot_needs_reset {
+            plot = plot.reset();
+            self.plot_needs_reset = false;
         }
+        plot.show(ui, |plot_ui| {
+            for (name, data, color, shape) in series {
+                let data = data.as_slice();
+                plot_ui.line(Line::new(name, data).color(color).width(3.0_f32));
+                // Unnamed, so the legend lists each series once.
+                plot_ui.points(
+                    Points::new("", data)
+                        .color(color)
+                        .shape(shape)
+                        .radius(4.0_f32),
+                );
+            }
+        });
     }
 
     fn ui_bottom_panel(&mut self, ui: &mut egui::Ui) {
@@ -677,35 +684,41 @@ impl DuelloApp {
             total_r: 1,
         };
 
+        // Empty until the first R-bin arrives; the plot then grows with the scan.
+        self.plot_cache = Some(PlotCache::default());
+        self.plot_needs_reset = true;
+
         let (tx, rx) = mpsc::channel();
         self.result_rx = Some(rx);
+        let (prog_tx, prog_rx) = mpsc::channel();
+        self.progress_rx = Some(prog_rx);
+        // Checked after every R-bin, which is how Cancel stops the scan.
+        let cancel = self.cancel_flag.clone();
+        let progress = move |p: ScanProgress| {
+            let _ = prog_tx.send(p);
+            if cancel.load(Ordering::Relaxed) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        };
 
         let inputs = self.inputs.clone();
 
         #[cfg(not(target_arch = "wasm32"))]
         {
             std::thread::spawn(move || {
-                let result = crate::compute::run_scan_blocking(&inputs, mol1_data, mol2_data);
+                let result =
+                    crate::compute::run_scan_blocking(&inputs, mol1_data, mol2_data, progress);
                 let _ = tx.send(result);
             });
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            let (prog_tx, prog_rx) = mpsc::channel();
-            self.progress_rx = Some(prog_rx);
-            let cancel = self.cancel_flag.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let result = crate::compute::run_scan_async(
-                    inputs,
-                    mol1_data,
-                    mol2_data,
-                    move |current, total| {
-                        let _ = prog_tx.send((current, total));
-                    },
-                    cancel,
-                )
-                .await;
+                let result =
+                    crate::compute::run_scan_async(inputs, mol1_data, mol2_data, progress).await;
                 let _ = tx.send(result);
             });
         }
@@ -713,13 +726,16 @@ impl DuelloApp {
 
     /// Poll for progress updates from the scan. Called each frame.
     fn poll_progress(&mut self) {
-        if let Some(rx) = &self.progress_rx {
-            // Drain all pending progress updates, keeping the latest
-            while let Ok((current, total)) = rx.try_recv() {
-                self.status = ComputeStatus::Running {
-                    current_r: current,
-                    total_r: total,
-                };
+        let Some(rx) = &self.progress_rx else {
+            return;
+        };
+        for p in rx.try_iter() {
+            self.status = ComputeStatus::Running {
+                current_r: p.done,
+                total_r: p.total,
+            };
+            if let (Some(point), Some(cache)) = (p.point, &mut self.plot_cache) {
+                cache.push(point);
             }
         }
     }
@@ -753,19 +769,24 @@ impl DuelloApp {
                 }
                 Ok(Err(e)) => {
                     self.error = Some(format!("{e:#}"));
-                    self.status = ComputeStatus::Idle;
-                    self.result_rx = None;
-                    self.progress_rx = None;
+                    self.abandon_scan();
                 }
                 Err(mpsc::TryRecvError::Empty) => {} // still running
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.error = Some("Scan thread terminated unexpectedly".to_string());
-                    self.status = ComputeStatus::Idle;
-                    self.result_rx = None;
-                    self.progress_rx = None;
+                    self.abandon_scan();
                 }
             }
         }
+    }
+
+    /// Ends a scan that won't deliver a result. Drops the partial curve, which would
+    /// otherwise look like a finished PMF.
+    fn abandon_scan(&mut self) {
+        self.status = ComputeStatus::Idle;
+        self.result_rx = None;
+        self.progress_rx = None;
+        self.plot_cache = None;
     }
 
     fn download_string(&self, content: &str, filename: &str) {
@@ -786,8 +807,11 @@ impl DuelloApp {
     fn download_csv(&self) {
         let Some(result) = &self.result else { return };
         let mut csv = String::from("R/A,F/kT,U/kT\n");
-        for (pmf, u) in result.pmf_data.iter().zip(&result.mean_energy_data) {
-            csv.push_str(&format!("{:.2},{:.4},{:.4}\n", pmf.0, pmf.1, u.1));
+        for p in &result.points {
+            csv.push_str(&format!(
+                "{:.2},{:.4},{:.4}\n",
+                p.r, p.free_energy, p.mean_energy
+            ));
         }
 
         #[cfg(not(target_arch = "wasm32"))]

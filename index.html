@@ -34,26 +34,52 @@
         body {
             display: flex;
             flex-direction: column;
+            color: var(--fg);
+            font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
         }
+        a { color: var(--link); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        button, select { font: inherit; }
+        .dim { color: var(--dim); }
         /* Plain HTML, so name, versions and the version menu still work when an
-           old build's wasm fails to start. */
+           old build's wasm fails to start. Wraps rather than hiding items on
+           narrow screens. */
         #info {
             display: flex;
+            flex-wrap: wrap;
             align-items: center;
-            gap: 0.9em;
+            gap: 0.2em 0.9em;
             padding: 4px 10px;
             background: var(--bar);
-            color: var(--fg);
-            font: 13px system-ui, -apple-system, "Segoe UI", sans-serif;
-            white-space: nowrap;
         }
+        #info > * { white-space: nowrap; }
         #info b { font-weight: 600; }
-        #info .dim { color: var(--dim); }
-        #info a { color: var(--link); text-decoration: none; }
-        #info a:hover { text-decoration: underline; }
-        #info select { font: inherit; }
-        #info .push { margin-left: auto; }
         #nogpu { color: var(--warn); }
+        /* Looks like a link; a button because it opens the popover. */
+        #info button {
+            color: var(--link);
+            background: none;
+            border: none;
+            padding: 0;
+            cursor: pointer;
+        }
+        #info button:hover { text-decoration: underline; }
+        /* Native popover: top layer, closes on outside click or Escape. Placed below
+           the header, whose height resize() measures. */
+        #cite {
+            position: fixed;
+            inset: calc(var(--header-height, 28px) + 6px) auto auto 10px;
+            margin: 0;
+            max-width: min(26em, calc(100vw - 20px));
+            box-sizing: border-box;
+            padding: 12px 14px;
+            border: 1px solid var(--dim);
+            border-radius: 6px;
+            background: var(--bar);
+            color: var(--fg);
+        }
+        #cite p { margin: 0 0 8px; }
+        #cite button { margin-right: 6px; }
         #duello_canvas {
             flex: 1;
             width: 100%;
@@ -67,17 +93,32 @@
         <b>DuelloWeb</b>
         <span id="build" class="dim">development build</span>
         <select id="versions" aria-label="Version" hidden></select>
+        <button popovertarget="cite">Cite</button>
+        <a href="https://github.com/mlund/duello-web" target="_blank" rel="noopener">GitHub</a>
         <span id="nogpu" hidden>WebGPU is not available in this browser</span>
-        <a class="push" href="https://github.com/mlund/duello-web" target="_blank" rel="noopener">GitHub</a>
     </header>
+    <div id="cite" popover>
+        <p id="reference">Vinterbladh, I.; Bye, J.; Curtis, R.; Hatch, H.; Grudinin, S.; Lund, M.
+            From Intermolecular Poses to Thermodynamics Using Subdivided Spheres.
+            <i>J. Phys. Chem. B</i> <b>2026</b>, 130, 6751&ndash;6758.
+            <a href="https://doi.org/10.1021/acs.jpcb.6c01665" target="_blank" rel="noopener">doi:10.1021/acs.jpcb.6c01665</a></p>
+        <p>
+            <button id="copy-ref">Copy reference</button>
+            <button id="copy-bib">Copy BibTeX</button>
+            <span id="copied" class="dim" hidden>Copied</span>
+        </p>
+        <p id="cite-version" class="dim" hidden></p>
+    </div>
     <!-- eframe needs the canvas to have width/height attributes for WebGPU surface -->
     <canvas id="duello_canvas" width="1024" height="720"></canvas>
     <script>
         // Resize canvas to fill the window below the header
         function resize() {
+            const header = document.getElementById("info").offsetHeight;
+            document.documentElement.style.setProperty("--header-height", `${header}px`);
             const c = document.getElementById("duello_canvas");
             c.width = window.innerWidth;
-            c.height = window.innerHeight - document.getElementById("info").offsetHeight;
+            c.height = window.innerHeight - header;
         }
         window.addEventListener("resize", resize);
         resize();
@@ -91,12 +132,41 @@
             }
         }
 
+        const BIBTEX = `@article{Vinterbladh2026,
+  author  = {Vinterbladh, Isabel and Bye, Jordan and Curtis, Robin and Hatch, Harold and Grudinin, Sergei and Lund, Mikael},
+  title   = {From Intermolecular Poses to Thermodynamics Using Subdivided Spheres},
+  journal = {J. Phys. Chem. B},
+  year    = {2026},
+  volume  = {130},
+  number  = {27},
+  pages   = {6751--6758},
+  doi     = {10.1021/acs.jpcb.6c01665}
+}`;
+
+        async function copy(text) {
+            try {
+                await navigator.clipboard.writeText(text);
+                const note = document.getElementById("copied");
+                note.hidden = false;
+                setTimeout(() => (note.hidden = true), 1500);
+            } catch (e) {
+                console.warn("Clipboard unavailable", e);
+            }
+        }
+        const reference = () =>
+            document.getElementById("reference").textContent.replace(/\s+/g, " ").trim();
+        document.getElementById("copy-ref").addEventListener("click", () => copy(reference()));
+        document.getElementById("copy-bib").addEventListener("click", () => copy(BIBTEX));
+
         // build-info.json is written per release by the deploy; versions.json is
         // shared by all releases, so old builds also list newer ones.
         (async () => {
             if (!navigator.gpu) document.getElementById("nogpu").hidden = false;
 
-            const info = await getJson("build-info.json");
+            const [info, versions] = await Promise.all([
+                getJson("build-info.json"),
+                getJson("../versions.json"),
+            ]);
             if (info) {
                 const build = document.getElementById("build");
                 const duello = document.createElement("a");
@@ -105,9 +175,14 @@
                 duello.rel = "noopener";
                 duello.textContent = `duello ${info.duello}`;
                 build.replaceChildren(`${info.web} · `, duello);
+
+                // Pairs the citation with the exact build, which is what makes results
+                // reproducible.
+                const note = document.getElementById("cite-version");
+                note.textContent = `Please also state the version used: DuelloWeb ${info.web} (duello ${info.duello}).`;
+                note.hidden = false;
             }
 
-            const versions = await getJson("../versions.json");
             if (!info || !versions || versions.length === 0) return;
             const select = document.getElementById("versions");
             versions.forEach((v, i) => {
