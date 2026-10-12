@@ -437,32 +437,31 @@ impl DuelloApp {
                 plot = plot.reset();
                 self.plot_needs_reset = false;
             }
-            plot
-                .show(ui, |plot_ui| {
-                    plot_ui.line(
-                        Line::new("Free energy", cache.pmf.clone())
-                            .color(blue)
-                            .width(2.0),
-                    );
-                    plot_ui.points(
-                        Points::new("", cache.pmf.clone())
-                            .color(blue)
-                            .shape(MarkerShape::Circle)
-                            .radius(3.0),
-                    );
+            plot.show(ui, |plot_ui| {
+                plot_ui.line(
+                    Line::new("Free energy", cache.pmf.clone())
+                        .color(blue)
+                        .width(2.0_f32),
+                );
+                plot_ui.points(
+                    Points::new("", cache.pmf.clone())
+                        .color(blue)
+                        .shape(MarkerShape::Circle)
+                        .radius(3.0_f32),
+                );
 
-                    plot_ui.line(
-                        Line::new("Average energy", cache.mean_energy.clone())
-                            .color(red)
-                            .width(2.0),
-                    );
-                    plot_ui.points(
-                        Points::new("", cache.mean_energy.clone())
-                            .color(red)
-                            .shape(MarkerShape::Diamond)
-                            .radius(3.0),
-                    );
-                });
+                plot_ui.line(
+                    Line::new("Average energy", cache.mean_energy.clone())
+                        .color(red)
+                        .width(2.0_f32),
+                );
+                plot_ui.points(
+                    Points::new("", cache.mean_energy.clone())
+                        .color(red)
+                        .shape(MarkerShape::Diamond)
+                        .radius(3.0_f32),
+                );
+            });
         } else {
             ui.centered_and_justified(|ui| {
                 ui.label("Upload PDB files and run a scan to see the PMF plot.");
