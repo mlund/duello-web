@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "duello-web"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -1193,7 +1193,6 @@ dependencies = [
  "log",
  "pollster",
  "rfd",
- "serde_json",
  "ureq",
  "wasm-bindgen",
  "wasm-bindgen-futures",

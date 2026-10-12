@@ -1,4 +1,4 @@
-# Duello Web
+# DuelloWeb
 
 Browser-based GUI for [Duello](https://github.com/mlund/duello) -- compute osmotic second virial coefficients (B2) and dissociation constants (Kd) for rigid macromolecules using WebGPU.
 
@@ -10,11 +10,13 @@ Visit **https://mlund.github.io/duello-web/** (requires a WebGPU-capable browser
 
 This opens the newest release. Every release stays available, unchanged, at
 `https://mlund.github.io/duello-web/vX.Y.Z/` for reproducing earlier results; switch
-with the version menu in the app.
+with the version menu in the header, which also shows the duello version the release
+was built with.
 
 ## Releasing
 
-Set `version` in `Cargo.toml`, commit, and push a matching tag (`vX.Y.Z`). The deploy
+DuelloWeb is versioned on its own; the duello it uses is pinned in `Cargo.toml` and
+`Cargo.lock`. Set `version` in `Cargo.toml`, commit, and push a matching tag (`vX.Y.Z`). The deploy
 workflow builds that tag once, attaches the build to the GitHub release, and republishes
 the site with all releases.
 

@@ -52,6 +52,14 @@ jobs:
       - name: Build
         run: trunk build --release --public-url "/duello-web/$GITHUB_REF_NAME/"
 
+      # Read by the HTML header, which must work without the wasm app.
+      - name: Write build-info.json
+        run: |
+          duello=$(awk '$0 == "name = \"duello\"" { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
+          test -n "$duello"
+          jq -n --arg web "$GITHUB_REF_NAME" --arg duello "$duello" '{web: $web, duello: $duello}' > dist/build-info.json
+          cat dist/build-info.json
+
       - name: Attach build to release
         run: |
           (cd dist && zip -qr "../site-$GITHUB_REF_NAME.zip" .)

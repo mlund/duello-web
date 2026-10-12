@@ -3,35 +3,128 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Duello</title>
+    <title>DuelloWeb</title>
     <style>
+        :root {
+            --bg: #1a1a1a;
+            --bar: #232323;
+            --fg: #d0d0d0;
+            --dim: #8a8a8a;
+            --link: #6fa8ff;
+            --warn: #ffb454;
+        }
+        @media (prefers-color-scheme: light) {
+            :root {
+                --bg: #f8f8f8;
+                --bar: #ececec;
+                --fg: #222;
+                --dim: #666;
+                --link: #1a5fd0;
+                --warn: #a35a00;
+            }
+        }
         html, body {
             margin: 0;
             padding: 0;
             width: 100%;
             height: 100%;
             overflow: hidden;
-            background: #1a1a1a;
+            background: var(--bg);
         }
+        body {
+            display: flex;
+            flex-direction: column;
+        }
+        /* Plain HTML, so name, versions and the version menu still work when an
+           old build's wasm fails to start. */
+        #info {
+            display: flex;
+            align-items: center;
+            gap: 0.9em;
+            padding: 4px 10px;
+            background: var(--bar);
+            color: var(--fg);
+            font: 13px system-ui, -apple-system, "Segoe UI", sans-serif;
+            white-space: nowrap;
+        }
+        #info b { font-weight: 600; }
+        #info .dim { color: var(--dim); }
+        #info a { color: var(--link); text-decoration: none; }
+        #info a:hover { text-decoration: underline; }
+        #info select { font: inherit; }
+        #info .push { margin-left: auto; }
+        #nogpu { color: var(--warn); }
         #duello_canvas {
+            flex: 1;
             width: 100%;
-            height: 100%;
+            min-height: 0;
             display: block;
         }
     </style>
 </head>
 <body>
+    <header id="info">
+        <b>DuelloWeb</b>
+        <span id="build" class="dim">development build</span>
+        <select id="versions" aria-label="Version" hidden></select>
+        <span id="nogpu" hidden>WebGPU is not available in this browser</span>
+        <a class="push" href="https://github.com/mlund/duello-web" target="_blank" rel="noopener">GitHub</a>
+    </header>
     <!-- eframe needs the canvas to have width/height attributes for WebGPU surface -->
     <canvas id="duello_canvas" width="1024" height="720"></canvas>
     <script>
-        // Resize canvas to match window
+        // Resize canvas to fill the window below the header
         function resize() {
             const c = document.getElementById("duello_canvas");
             c.width = window.innerWidth;
-            c.height = window.innerHeight;
+            c.height = window.innerHeight - document.getElementById("info").offsetHeight;
         }
         window.addEventListener("resize", resize);
         resize();
+
+        async function getJson(url) {
+            try {
+                const r = await fetch(url);
+                return r.ok ? await r.json() : null;
+            } catch {
+                return null;
+            }
+        }
+
+        // build-info.json is written per release by the deploy; versions.json is
+        // shared by all releases, so old builds also list newer ones.
+        (async () => {
+            if (!navigator.gpu) document.getElementById("nogpu").hidden = false;
+
+            const info = await getJson("build-info.json");
+            if (info) {
+                const build = document.getElementById("build");
+                const duello = document.createElement("a");
+                duello.href = `https://github.com/mlund/duello/releases/tag/v${info.duello}`;
+                duello.target = "_blank";
+                duello.rel = "noopener";
+                duello.textContent = `duello ${info.duello}`;
+                build.replaceChildren(`${info.web} · `, duello);
+            }
+
+            const versions = await getJson("../versions.json");
+            if (!info || !versions || versions.length === 0) return;
+            const select = document.getElementById("versions");
+            versions.forEach((v, i) => {
+                const label = i === 0 ? `${v} (latest)` : v;
+                select.add(new Option(label, v, false, v === info.web));
+            });
+            select.addEventListener("change", () => {
+                const v = select.value;
+                if (confirm(`Switch to DuelloWeb ${v}? Current results will be lost.`)) {
+                    window.location.href = `../${v}/`;
+                } else {
+                    select.value = info.web;
+                }
+            });
+            select.hidden = false;
+            resize();
+        })();
     </script>
 </body>
 </html>

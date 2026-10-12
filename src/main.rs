@@ -1,5 +1,6 @@
 mod app;
 mod compute;
+#[cfg(not(target_arch = "wasm32"))]
 mod version;
 
 fn main() -> eframe::Result {
@@ -12,7 +13,7 @@ fn main() -> eframe::Result {
             ..Default::default()
         };
         eframe::run_native(
-            "Duello",
+            "DuelloWeb",
             native_options,
             Box::new(|cc| Ok(Box::new(app::DuelloApp::new(cc)))),
         )

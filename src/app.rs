@@ -134,7 +134,6 @@ pub struct DuelloApp {
     cancel_flag: Arc<AtomicBool>,
     /// Channel for receiving file uploads (mol_num, name, data).
     file_rx: Option<mpsc::Receiver<(u8, String, Vec<u8>)>>,
-    versions: crate::version::VersionPicker,
 }
 
 impl DuelloApp {
@@ -168,17 +167,18 @@ impl DuelloApp {
             progress_rx: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             file_rx: None,
-            versions: crate::version::VersionPicker::new(),
         }
     }
 
     fn ui_left_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Duello");
-        ui.hyperlink_to("duello on GitHub", "https://github.com/mlund/duello");
-        self.versions.ui(ui, self.result.is_some());
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(2.0);
+        // The browser shows this in the HTML header instead.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::version::ui(ui);
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(2.0);
+        }
 
         // --- Molecules ---
         ui.strong("Molecules");
@@ -807,7 +807,7 @@ impl DuelloApp {
 
 /// Fetch a URL and return its body as bytes (WASM only).
 #[cfg(target_arch = "wasm32")]
-pub(crate) async fn fetch_url(url: &str) -> anyhow::Result<Vec<u8>> {
+async fn fetch_url(url: &str) -> anyhow::Result<Vec<u8>> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
 
