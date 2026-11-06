@@ -39,6 +39,7 @@ fn install_fallback_font(ctx: &egui::Context) {
 impl DuelloApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_fallback_font(&cc.egui_ctx);
+        crate::viewer::register(cc);
         Self {
             tab: Tab::Twobody,
             onebody: OnebodyTab,

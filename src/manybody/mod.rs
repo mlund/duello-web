@@ -4,6 +4,7 @@
 //! inputs and run control; each analysis is a floating window.
 
 mod plots;
+mod scene;
 mod stats;
 mod windows;
 
@@ -58,11 +59,15 @@ pub struct ManybodyTab {
     /// Bumped per run, so plots fit each run's data instead of keeping
     /// the last run's zoom.
     run_id: u64,
+    viewer: crate::viewer::Viewer,
+    /// Copy shown in the Simulation pane.
+    view_copy: usize,
 }
 
 #[derive(Clone, Copy)]
 struct RunInfo {
     n_bodies: usize,
+    copies: usize,
     millimolar: f64,
     salt_millimolar: f64,
     detailed: bool,
@@ -95,6 +100,8 @@ impl Default for ManybodyTab {
             error: None,
             run_info: None,
             run_id: 0,
+            viewer: Default::default(),
+            view_copy: 0,
         }
     }
 }
@@ -134,7 +141,7 @@ impl ManybodyTab {
             Pane::Scattering => self.ui_scattering_pane(ui),
             Pane::PairCorrelation => self.ui_pair_correlation(ui),
             Pane::Stats => self.ui_stats(ui),
-            Pane::Simulation => placeholder(ui, "The 3D view is not available yet."),
+            Pane::Simulation => self.ui_simulation(ui),
         }
     }
 
@@ -172,6 +179,27 @@ impl ManybodyTab {
             return None;
         }
         Some(run)
+    }
+
+    /// Runs only while the pane is expanded (see `windows::show`), and
+    /// rebuilds the scene only when the shown configuration changes.
+    fn ui_simulation(&mut self, ui: &mut egui::Ui) {
+        let (Some(run), Some(info)) = (&self.run, self.run_info) else {
+            return placeholder(ui, "Start a run to see the box.");
+        };
+        // A new run may have fewer copies than the one last shown.
+        if self.view_copy >= info.copies {
+            self.view_copy = 0;
+        }
+        if info.copies > 1 {
+            copy_picker(ui, &mut self.view_copy, info.copies);
+        }
+        let Ok(frame) = run.frame(self.view_copy) else {
+            return;
+        };
+        let key = (self.run_id, frame.copy, frame.sweep);
+        self.viewer
+            .ui(ui, key, || scene::scene(&frame, run.reference()));
     }
 
     fn ui_stats(&mut self, ui: &mut egui::Ui) {
@@ -438,6 +466,7 @@ impl ManybodyTab {
                 self.run = Some(run);
                 self.run_info = Some(RunInfo {
                     n_bodies: self.n_bodies,
+                    copies: self.copies,
                     millimolar: self.millimolar,
                     salt_millimolar: archive.settings.molarity * 1e3,
                     detailed: self.detailed,
@@ -612,6 +641,18 @@ fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(2.0);
     ui.strong(title);
     ui.add_space(2.0);
+}
+
+fn copy_picker(ui: &mut egui::Ui, copy: &mut usize, copies: usize) {
+    egui::ComboBox::from_label("Copy")
+        .selected_text(format!("{}", *copy + 1))
+        .show_ui(ui, |ui| {
+            for c in 0..copies {
+                ui.selectable_value(copy, c, format!("{}", c + 1));
+            }
+        })
+        .response
+        .on_hover_text("Which independent copy of the system to show");
 }
 
 /// What a pane shows until it has data.

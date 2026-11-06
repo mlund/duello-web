@@ -9,6 +9,8 @@ duello = { git = "https://github.com/mlund/duello.git", tag = "v0.7.0", default-
 eframe = { version = "0.37", default-features = false, features = ["wgpu"] }
 egui_plot = "0.38"
 egui = "0.37"
+glam = "0.30"
+bytemuck = { version = "1", features = ["derive"] }
 rfd = "0.15"
 log = "0.4"
 anyhow = "1.0"
