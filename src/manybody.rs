@@ -1,5 +1,6 @@
 //! Manybody tab: Metropolis MC of N copies of the loaded homo-dimer scan,
-//! reporting I(q), S_eff(q), P(q) and run statistics.
+//! reporting S_com(q) against charged-sphere theory, optionally bead-level
+//! I(q), P(q) and S_eff(q), and run statistics.
 
 use crate::app::save_file;
 use duello::archive::ScanArchive;
@@ -17,26 +18,46 @@ use web_time::Instant;
 /// responsive while the run makes progress.
 const FRAME_BUDGET_MS: f64 = 30.0;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum View {
     StructureFactor,
-    MassCentre,
     Intensity,
     FormFactor,
 }
 
+/// How a series is drawn: simulated curves solid, the theory dashed.
+#[derive(Clone, Copy)]
+enum Style {
+    Primary,
+    Secondary,
+    Reference,
+}
+
+struct Series<'a> {
+    name: &'static str,
+    values: &'a [f64],
+    /// Where copies give them.
+    errors: Option<&'a [f64]>,
+    style: Style,
+}
+
+impl<'a> Series<'a> {
+    fn new(name: &'static str, values: &'a [f64], errors: Option<&'a [f64]>, style: Style) -> Self {
+        Self {
+            name,
+            values,
+            errors,
+            style,
+        }
+    }
+}
+
 impl View {
-    const ALL: [View; 4] = [
-        View::StructureFactor,
-        View::MassCentre,
-        View::Intensity,
-        View::FormFactor,
-    ];
+    const ALL: [View; 3] = [View::StructureFactor, View::Intensity, View::FormFactor];
 
     fn label(self) -> &'static str {
         match self {
-            View::StructureFactor => "S_eff(q)",
-            View::MassCentre => "S_com(q)",
+            View::StructureFactor => "S(q)",
             View::Intensity => "I(q)",
             View::FormFactor => "P(q)",
         }
@@ -45,20 +66,53 @@ impl View {
     /// I and P are per molecule, i.e. I/c up to contrast and molar mass.
     fn axis_label(self) -> &'static str {
         match self {
-            View::StructureFactor => "S_eff",
-            View::MassCentre => "S_com (mass centres)",
+            View::StructureFactor => "S(q)",
             View::Intensity => "I(q)/c (relative)",
             View::FormFactor => "P(q) (relative)",
         }
     }
 
-    /// Values, with errors where copies give them.
-    fn data(self, curve: &ScatteringCurve) -> (&[f64], Option<&[f64]>) {
+    /// I and P come from the bead sums, which only detailed runs do.
+    fn offered(self, detailed: bool) -> bool {
+        detailed || self == View::StructureFactor
+    }
+
+    /// S_com and its theory are cheap, so every run shows them; S_eff joins
+    /// when beads are summed.
+    fn curves(self, curve: &ScatteringCurve, detailed: bool) -> Vec<Series<'_>> {
         match self {
-            View::StructureFactor => (&curve.s_eff, curve.s_eff_error.as_deref()),
-            View::MassCentre => (&curve.s_com, curve.s_com_error.as_deref()),
-            View::Intensity => (&curve.intensity, None),
-            View::FormFactor => (&curve.form_factor, None),
+            View::StructureFactor => {
+                let mut all = vec![Series::new(
+                    "S_com",
+                    &curve.s_com,
+                    curve.s_com_error.as_deref(),
+                    Style::Primary,
+                )];
+                if detailed {
+                    all.push(Series::new(
+                        "S_eff",
+                        &curve.s_eff,
+                        curve.s_eff_error.as_deref(),
+                        Style::Secondary,
+                    ));
+                }
+                if !curve.s_hsy.is_empty() {
+                    all.push(Series::new(
+                        "charged sphere (MPB-RMSA)",
+                        &curve.s_hsy,
+                        None,
+                        Style::Reference,
+                    ));
+                }
+                all
+            }
+            View::Intensity => vec![Series::new("I(q)", &curve.intensity, None, Style::Primary)],
+            View::FormFactor => vec![Series::new(
+                "P(q)",
+                &curve.form_factor,
+                None,
+                Style::Primary,
+            )],
         }
     }
 
@@ -67,12 +121,8 @@ impl View {
     fn default_log_axes(self) -> LogAxes {
         LogAxes {
             x: false,
-            y: !self.is_structure_factor(),
+            y: self != View::StructureFactor,
         }
-    }
-
-    fn is_structure_factor(self) -> bool {
-        matches!(self, View::StructureFactor | View::MassCentre)
     }
 }
 
@@ -86,7 +136,7 @@ pub struct ManybodyTab {
     n_bodies: usize,
     millimolar: f64,
     copies: usize,
-    centres_only: bool,
+    detailed: bool,
     /// Lattice q-vectors per |q| bin for the bead sums.
     vectors_per_bin: usize,
     /// Starting (or, untuned, fixed) translation (Å) and rotation (rad).
@@ -116,7 +166,7 @@ struct RunInfo {
     n_bodies: usize,
     millimolar: f64,
     salt_millimolar: f64,
-    centres_only: bool,
+    detailed: bool,
     tune_steps: bool,
 }
 
@@ -127,7 +177,7 @@ impl Default for ManybodyTab {
             n_bodies: 200,
             millimolar: 5.0,
             copies: 4,
-            centres_only: false,
+            detailed: false,
             vectors_per_bin: defaults.vectors_per_bin,
             translation: defaults.translation,
             rotation: defaults.rotation,
@@ -197,48 +247,28 @@ impl ManybodyTab {
                             .speed(0.1),
                     );
                     ui.end_row();
-                    ui.label("Independent copies");
-                    ui.add(egui::DragValue::new(&mut self.copies).range(1..=16));
-                    ui.end_row();
-                    let check = RunSpec::new(1, 1.0).sweeps_per_check;
-                    ui.label("Mass centres only").on_hover_text(format!(
-                        "Skip bead scattering: S_com only, sampled every {check} sweeps"
+                    let defaults = RunSpec::new(1, 1.0);
+                    ui.label("Detailed I(q)").on_hover_text(format!(
+                        "Also sum over beads for I(q), P(q) and S_eff: a frame every {} \
+                         sweeps instead of {}. S_com and, where it has a solution, the \
+                         charged-sphere S(q) are always shown",
+                        defaults.sweeps_per_frame, defaults.sweeps_per_check
                     ));
-                    ui.checkbox(&mut self.centres_only, "");
+                    ui.checkbox(&mut self.detailed, "");
                     ui.end_row();
                     ui.label("q-vectors per bin").on_hover_text(
                         "Lattice q-vectors per 2π/L bin for the bead sums: cost grows with \
                          this; more gives smoother I(q) and S_eff",
                     );
                     ui.add_enabled(
-                        !self.centres_only,
+                        self.detailed,
                         egui::DragValue::new(&mut self.vectors_per_bin).range(1..=500),
                     );
                     ui.end_row();
-                    ui.label("Tune move steps").on_hover_text(
-                        "During equilibration, find the steps that move bodies furthest per \
-                         attempted move; frozen for production",
-                    );
-                    ui.checkbox(&mut self.tune_steps, "");
-                    ui.end_row();
-                    let start = if self.tune_steps { " (start)" } else { "" };
-                    ui.label(format!("Translation step{start} (Å)"));
-                    // Steps beyond L/2 add nothing (and are clamped).
-                    let half_box = box_length(self.n_bodies, self.millimolar * 1e-3) / 2.0;
-                    ui.add(
-                        egui::DragValue::new(&mut self.translation)
-                            .range(0.01..=half_box)
-                            .speed(0.1),
-                    );
-                    ui.end_row();
-                    ui.label(format!("Rotation step{start} (rad)"));
-                    ui.add(
-                        egui::DragValue::new(&mut self.rotation)
-                            .range(0.0..=std::f64::consts::PI)
-                            .speed(0.01),
-                    );
-                    ui.end_row();
                 });
+            egui::CollapsingHeader::new("Monte Carlo")
+                .default_open(false)
+                .show(ui, |ui| self.ui_mc_inputs(ui));
         });
         let can_start = self.ui_system_info(ui, archive);
         if ui
@@ -247,6 +277,41 @@ impl ManybodyTab {
         {
             self.start(archive);
         }
+    }
+
+    /// Defaults suit most runs, hence collapsed.
+    fn ui_mc_inputs(&mut self, ui: &mut egui::Ui) {
+        egui::Grid::new("manybody_mc_grid")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Independent copies")
+                    .on_hover_text("Error bars come from the spread between copies");
+                ui.add(egui::DragValue::new(&mut self.copies).range(1..=16));
+                ui.end_row();
+                ui.label("Tune move steps").on_hover_text(
+                    "During equilibration, find the steps that move bodies furthest per \
+                         attempted move; frozen for production",
+                );
+                ui.checkbox(&mut self.tune_steps, "");
+                ui.end_row();
+                let start = if self.tune_steps { " (start)" } else { "" };
+                ui.label(format!("Translation step{start} (Å)"));
+                // Steps beyond L/2 add nothing (and are clamped).
+                let half_box = box_length(self.n_bodies, self.millimolar * 1e-3) / 2.0;
+                ui.add(
+                    egui::DragValue::new(&mut self.translation)
+                        .range(0.01..=half_box)
+                        .speed(0.1),
+                );
+                ui.end_row();
+                ui.label(format!("Rotation step{start} (rad)"));
+                ui.add(
+                    egui::DragValue::new(&mut self.rotation)
+                        .range(0.0..=std::f64::consts::PI)
+                        .speed(0.01),
+                );
+                ui.end_row();
+            });
     }
 
     /// Box, q range and screening for the chosen N and concentration; false
@@ -279,12 +344,12 @@ impl ManybodyTab {
     fn start(&mut self, archive: &ScanArchive) {
         let mut spec = RunSpec::new(self.n_bodies, self.millimolar * 1e-3);
         spec.copies = self.copies;
-        spec.centres_only = self.centres_only;
+        spec.centres_only = !self.detailed;
         spec.vectors_per_bin = self.vectors_per_bin;
         spec.translation = self.translation;
         spec.rotation = self.rotation;
         spec.tune_steps = self.tune_steps;
-        if self.centres_only {
+        if !self.detailed {
             // Mass-centre frames cost little next to the sweeps between them.
             spec.sweeps_per_frame = spec.sweeps_per_check;
         }
@@ -295,7 +360,7 @@ impl ManybodyTab {
                     n_bodies: self.n_bodies,
                     millimolar: self.millimolar,
                     salt_millimolar: archive.settings.molarity * 1e3,
-                    centres_only: self.centres_only,
+                    detailed: self.detailed,
                     tune_steps: self.tune_steps,
                 });
                 self.running = true;
@@ -397,17 +462,16 @@ impl ManybodyTab {
             self.ui_energy_trace(ui, color);
             return;
         }
-        let centres_only = self.run_info.is_some_and(|i| i.centres_only);
-        let available = |v: View| !centres_only || v == View::MassCentre;
-        if !available(self.view) {
-            self.view = View::MassCentre;
+        let detailed = self.run_info.is_some_and(|i| i.detailed);
+        if !self.view.offered(detailed) {
+            self.view = View::StructureFactor;
         }
         let axes = &mut self.log_axes[self.view as usize];
         ui.horizontal(|ui| {
             egui::ComboBox::from_label("Plot")
                 .selected_text(self.view.label())
                 .show_ui(ui, |ui| {
-                    for view in View::ALL.into_iter().filter(|&v| available(v)) {
+                    for view in View::ALL.into_iter().filter(|v| v.offered(detailed)) {
                         ui.selectable_value(&mut self.view, view, view.label());
                     }
                 });
@@ -416,32 +480,17 @@ impl ManybodyTab {
         });
         let axes = self.log_axes[self.view as usize];
         let curve = run.curve();
-        let (values, errors) = self.view.data(&curve);
-        let points = series(&curve.q, values, axes);
-        let bars = errors.map(|errors| error_bars(&curve.q, values, errors, axes));
-        let reference = self
-            .view
-            .is_structure_factor()
-            .then(|| series(&curve.q, &curve.s_hsy, axes));
-        let reference_color = reference_color(ui.visuals().dark_mode);
+        let all = self.view.curves(&curve, detailed);
+        let dark = ui.visuals().dark_mode;
         // One id per view and scale, so each fits its own bounds when shown.
-        Plot::new(("manybody_plot", self.view.label(), axes.x, axes.y))
+        // Also per series set, so S_eff appearing doesn't inherit stale bounds.
+        Plot::new(("manybody_plot", self.view.label(), axes.x, axes.y, detailed))
             .legend(egui_plot::Legend::default())
             .x_axis_label(log_label("q (Å⁻¹)", axes.x))
             .y_axis_label(log_label(self.view.axis_label(), axes.y))
             .show(ui, |plot| {
-                for bar in bars.into_iter().flatten() {
-                    // Unnamed, so the legend lists only the curve.
-                    plot.line(Line::new("", PlotPoints::from(bar.to_vec())).color(color));
-                }
-                marked_line(plot, self.view.label(), points, color);
-                if let Some(reference) = reference {
-                    plot.line(
-                        Line::new("charged sphere (MPB-RMSA)", PlotPoints::from(reference))
-                            .color(reference_color)
-                            .width(2.0_f32)
-                            .style(egui_plot::LineStyle::dashed_dense()),
-                    );
+                for s in &all {
+                    draw_series(plot, &curve.q, s, axes, dark);
                 }
             });
     }
@@ -561,7 +610,7 @@ fn point(q: f64, v: f64, axes: LogAxes) -> Option<[f64; 2]> {
     Some([scaled(q, axes.x)?, scaled(v, axes.y)?])
 }
 
-fn series(q: &[f64], values: &[f64], axes: LogAxes) -> Vec<[f64; 2]> {
+fn to_points(q: &[f64], values: &[f64], axes: LogAxes) -> Vec<[f64; 2]> {
     q.iter()
         .zip(values)
         .filter_map(|(&q, &v)| point(q, v, axes))
@@ -585,12 +634,45 @@ fn curve_color(dark_mode: bool) -> egui::Color32 {
     }
 }
 
-fn reference_color(dark_mode: bool) -> egui::Color32 {
-    if dark_mode {
-        egui::Color32::from_rgb(255, 170, 80)
-    } else {
-        egui::Color32::from_rgb(200, 90, 0)
+fn style_color(style: Style, dark_mode: bool) -> egui::Color32 {
+    let rgb = |dark: (u8, u8, u8), light: (u8, u8, u8)| {
+        let (r, g, b) = if dark_mode { dark } else { light };
+        egui::Color32::from_rgb(r, g, b)
+    };
+    match style {
+        Style::Primary => curve_color(dark_mode),
+        Style::Secondary => rgb((90, 210, 140), (0, 130, 70)),
+        Style::Reference => rgb((255, 170, 80), (200, 90, 0)),
     }
+}
+
+fn draw_series(
+    plot: &mut egui_plot::PlotUi,
+    q: &[f64],
+    s: &Series,
+    axes: LogAxes,
+    dark_mode: bool,
+) {
+    let color = style_color(s.style, dark_mode);
+    let points = to_points(q, s.values, axes);
+    if let Style::Reference = s.style {
+        plot.line(
+            Line::new(s.name, PlotPoints::from(points))
+                .color(color)
+                .width(2.0_f32)
+                .style(egui_plot::LineStyle::dashed_dense()),
+        );
+        return;
+    }
+    for bar in s
+        .errors
+        .map(|e| error_bars(q, s.values, e, axes))
+        .into_iter()
+        .flatten()
+    {
+        plot.line(Line::new(s.name, PlotPoints::from(bar.to_vec())).color(color));
+    }
+    marked_line(plot, s.name, points, color);
 }
 
 /// U-range over the last half of the sweeps, where the run still drifts
@@ -620,9 +702,9 @@ fn marked_line(
             .color(color)
             .width(3.0_f32),
     );
-    // Unnamed, so the legend lists each series once.
+    // Same name, so one legend entry toggles line and markers together.
     plot.points(
-        Points::new("", PlotPoints::from(points))
+        Points::new(name, PlotPoints::from(points))
             .color(color)
             .shape(MarkerShape::Circle)
             .radius(4.0_f32),
@@ -660,6 +742,53 @@ mod tests {
             (lo + 3.1).abs() < 1e-12 && (hi + 0.9).abs() < 1e-12,
             "{lo} {hi}"
         );
+    }
+
+    fn curve() -> ScatteringCurve {
+        ScatteringCurve {
+            q: vec![0.1],
+            intensity: vec![1.0],
+            form_factor: vec![2.0],
+            s_eff: vec![3.0],
+            s_eff_error: None,
+            s_hsy: vec![4.0],
+            s_com: vec![5.0],
+            s_com_error: None,
+            frames: 1,
+        }
+    }
+
+    fn names(view: View, detailed: bool) -> Vec<&'static str> {
+        let curve = curve();
+        view.curves(&curve, detailed)
+            .iter()
+            .map(|s| s.name)
+            .collect()
+    }
+
+    #[test]
+    fn structure_factor_always_shows_mass_centres_and_reference() {
+        assert_eq!(
+            names(View::StructureFactor, false),
+            ["S_com", "charged sphere (MPB-RMSA)"]
+        );
+        assert_eq!(
+            names(View::StructureFactor, true),
+            ["S_com", "S_eff", "charged sphere (MPB-RMSA)"]
+        );
+    }
+
+    #[test]
+    fn bead_views_need_a_detailed_run() {
+        let offered = |detailed| {
+            View::ALL
+                .into_iter()
+                .filter(|v| v.offered(detailed))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(offered(false), [View::StructureFactor]);
+        assert_eq!(offered(true), View::ALL);
+        assert_eq!(names(View::Intensity, true), ["I(q)"]);
     }
 
     #[test]
