@@ -1,10 +1,14 @@
 use crate::compute::{ComputeResult, ComputeStatus};
-use duello::web_api::{PmfPoint, ScanProgress};
+use duello::web_api::{PmfPoint, ScanProgress, ScanSettings};
 use egui_plot::{Line, MarkerShape, Plot, PlotPoint, Points};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
+
+/// Kept on screen while it applies, since it explains why "Run scan" is disabled.
+const NO_GPU: &str =
+    "No GPU/WebGPU adapter found. A WebGPU-capable browser is required (Chrome 113+, Edge 113+).";
 
 /// Force field model choices.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -15,6 +19,9 @@ pub enum Model {
 }
 
 impl Model {
+    /// Every selectable model; the picker and name lookup share this list.
+    pub const ALL: [Model; 3] = [Model::Calvados3, Model::KimHummer, Model::Pasquier];
+
     pub fn name(&self) -> &str {
         match self {
             Model::Calvados3 => "calvados3",
@@ -29,6 +36,14 @@ impl Model {
             Model::KimHummer => "Kim-Hummer",
             Model::Pasquier => "Pasquier",
         }
+    }
+
+    /// `None` for models the UI can't select, e.g. "custom topology" from a CLI
+    /// scan with `--top`. Case-insensitive, as CLI spellings may vary.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|model| model.name().eq_ignore_ascii_case(name))
     }
 }
 
@@ -55,6 +70,52 @@ pub struct ScanInputs {
     pub model: Model,
     pub cg: CgPolicy,
     pub homo_dimer: bool,
+}
+
+impl From<&ScanInputs> for ScanSettings {
+    fn from(inputs: &ScanInputs) -> Self {
+        Self {
+            ph: inputs.ph,
+            model: inputs.model.name().to_string(),
+            single_bead: inputs.cg == CgPolicy::Single,
+            rmin: inputs.rmin,
+            rmax: inputs.rmax,
+            dr: inputs.dr,
+            molarity: inputs.molarity,
+            temperature: inputs.temperature,
+            max_ndiv: inputs.max_ndiv,
+            gradient_threshold: inputs.gradient_threshold,
+            cutoff: inputs.cutoff,
+            grid_size: inputs.grid_size,
+            homo_dimer: inputs.homo_dimer,
+        }
+    }
+}
+
+impl ScanInputs {
+    /// Inputs matching an imported scan, so the panel describes what's shown.
+    /// A model the UI can't select leaves `fallback` chosen; callers warn.
+    pub fn from_settings(s: &ScanSettings, fallback: Model) -> Self {
+        Self {
+            rmin: s.rmin,
+            rmax: s.rmax,
+            dr: s.dr,
+            molarity: s.molarity,
+            temperature: s.temperature,
+            max_ndiv: s.max_ndiv,
+            gradient_threshold: s.gradient_threshold,
+            cutoff: s.cutoff,
+            grid_size: s.grid_size,
+            ph: s.ph,
+            model: Model::from_name(&s.model).unwrap_or(fallback),
+            cg: if s.single_bead {
+                CgPolicy::Single
+            } else {
+                CgPolicy::Multi
+            },
+            homo_dimer: s.homo_dimer,
+        }
+    }
 }
 
 impl Default for ScanInputs {
@@ -139,6 +200,8 @@ pub struct DuelloApp {
     cancel_flag: Arc<AtomicBool>,
     /// Channel for receiving file uploads (mol_num, name, data).
     file_rx: Option<mpsc::Receiver<(u8, String, Vec<u8>)>>,
+    /// Bytes of a scan archive picked for import.
+    import_rx: Option<mpsc::Receiver<Vec<u8>>>,
 }
 
 impl DuelloApp {
@@ -162,16 +225,13 @@ impl DuelloApp {
             result: None,
             plot_cache: None,
             plot_needs_reset: false,
-            error: if gpu_available {
-                None
-            } else {
-                Some("No GPU/WebGPU adapter found. A WebGPU-capable browser is required (Chrome 113+, Edge 113+).".to_string())
-            },
+            error: (!gpu_available).then(|| NO_GPU.to_string()),
             gpu_available,
             result_rx: None,
             progress_rx: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             file_rx: None,
+            import_rx: None,
         }
     }
 
@@ -220,9 +280,9 @@ impl DuelloApp {
                 egui::ComboBox::from_id_salt("model_combo")
                     .selected_text(self.inputs.model.label())
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.inputs.model, Model::Calvados3, "CALVADOS 3");
-                        ui.selectable_value(&mut self.inputs.model, Model::KimHummer, "Kim-Hummer");
-                        ui.selectable_value(&mut self.inputs.model, Model::Pasquier, "Pasquier");
+                        for model in Model::ALL {
+                            ui.selectable_value(&mut self.inputs.model, model, model.label());
+                        }
                     });
                 ui.end_row();
 
@@ -418,6 +478,13 @@ impl DuelloApp {
                 self.cancel_flag.store(true, Ordering::Relaxed);
                 self.abandon_scan();
             }
+            let idle = matches!(self.status, ComputeStatus::Idle);
+            if ui
+                .add_enabled(idle, egui::Button::new("Import scan..."))
+                .clicked()
+            {
+                self.pick_scan_file();
+            }
         });
     }
 
@@ -500,14 +567,13 @@ impl DuelloApp {
         // Results
         if let Some(result) = &self.result {
             ui.separator();
-            let (mw1, mw2) = result.molar_masses;
-            let (z1, z2) = result.net_charges;
+            let (mw1, mw2) = result.molar_masses();
+            let (z1, z2) = result.net_charges();
             ui.label(format!("Mw = {mw1:.1} / {mw2:.1} g/mol"));
             ui.label(format!("Net charge = {z1:+.1} / {z2:+.1} e"));
             ui.separator();
             let b2 = result.virial.b2();
             ui.label(format!("B\u{2082} = {b2:.2} \u{00C5}\u{00B3}"));
-            let (mw1, mw2) = result.molar_masses;
             ui.label(format!(
                 "B\u{2082} = {:.2e} mol*ml/g\u{00B2}",
                 result.virial.mol_ml_per_gram2(mw1, mw2)
@@ -525,20 +591,30 @@ impl DuelloApp {
             }
 
             // Download buttons
+            let mut export = false;
             ui.horizontal_wrapped(|ui| {
                 if ui.button("PMF (.csv)").clicked() {
                     self.download_csv();
                 }
                 if ui.button("Mol 1 (.xyz)").clicked() {
-                    self.download_string(&result.cg_xyz.0, "mol1_cg.xyz");
+                    self.download_string(&result.bodies[0].to_xyz(), "mol1_cg.xyz");
                 }
                 if ui.button("Mol 2 (.xyz)").clicked() {
-                    self.download_string(&result.cg_xyz.1, "mol2_cg.xyz");
+                    self.download_string(&result.bodies[1].to_xyz(), "mol2_cg.xyz");
                 }
                 if ui.button("Topology (.yaml)").clicked() {
                     self.download_string(&result.topology_yaml, "topology.yaml");
                 }
+                export = ui
+                    .button("Scan (.duello)")
+                    .on_hover_text("Table, CG bodies and results; re-import without rescanning")
+                    .clicked();
             });
+            // After the row: the closure holds `&self`, but exporting needs
+            // `&mut self` to report failures.
+            if export {
+                self.export_scan();
+            }
         }
     }
 
@@ -760,9 +836,7 @@ impl DuelloApp {
         if let Some(rx) = &self.result_rx {
             match rx.try_recv() {
                 Ok(Ok(result)) => {
-                    self.plot_cache = Some(PlotCache::from_result(&result));
-                    self.plot_needs_reset = true;
-                    self.result = Some(result);
+                    self.install_result(result);
                     self.status = ComputeStatus::Idle;
                     self.result_rx = None;
                     self.progress_rx = None;
@@ -789,19 +863,111 @@ impl DuelloApp {
         self.plot_cache = None;
     }
 
+    /// Shared by finished scans and imports, so both show a result the same way.
+    fn install_result(&mut self, result: ComputeResult) {
+        self.plot_cache = Some(PlotCache::from_result(&result));
+        self.plot_needs_reset = true;
+        self.result = Some(result);
+    }
+
+    /// Save failures only reach the log, as before the scan export existed.
     fn download_string(&self, content: &str, filename: &str) {
         #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = rfd::FileDialog::new().set_file_name(filename).save_file() {
+            if let Err(e) = std::fs::write(&path, content) {
+                log::error!("Failed to save {filename}: {e}");
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        download_bytes_as_file(content.as_bytes(), filename);
+    }
+
+    /// Native asks for the path first: serializing the table can take a while,
+    /// and is wasted if the dialog is cancelled.
+    fn export_scan(&mut self) {
+        let Some(result) = &self.result else { return };
+        const NAME: &str = "scan.duello";
+        #[cfg(not(target_arch = "wasm32"))]
+        let Some(path) = rfd::FileDialog::new().set_file_name(NAME).save_file() else {
+            return;
+        };
+        let bytes = match result.to_bytes() {
+            Ok(bytes) => bytes,
+            Err(e) => return self.error = Some(format!("Export failed: {e:#}")),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Err(e) = std::fs::write(&path, bytes) {
+            self.error = Some(format!("Export failed: {e}"));
+        }
+        #[cfg(target_arch = "wasm32")]
+        download_bytes_as_file(&bytes, NAME);
+    }
+
+    fn pick_scan_file(&mut self) {
+        const FILTER: (&str, &[&str]) = ("Duello scan", &["duello"]);
+        // Native: blocking dialog, as `pick_file` does, so no channel is needed.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter(FILTER.0, FILTER.1)
+            .pick_file()
         {
-            if let Some(path) = rfd::FileDialog::new().set_file_name(filename).save_file() {
-                if let Err(e) = std::fs::write(&path, content) {
-                    log::error!("Failed to save {filename}: {e}");
-                }
+            match std::fs::read(&path) {
+                Ok(bytes) => self.import_scan(&bytes),
+                Err(e) => self.error = Some(format!("Import failed: {e}")),
             }
         }
         #[cfg(target_arch = "wasm32")]
         {
-            download_string_as_file(content, filename);
+            let (tx, rx) = mpsc::channel();
+            self.import_rx = Some(rx);
+            wasm_bindgen_futures::spawn_local(async move {
+                let dialog = rfd::AsyncFileDialog::new().add_filter(FILTER.0, FILTER.1);
+                if let Some(file) = dialog.pick_file().await {
+                    let _ = tx.send(file.read().await);
+                }
+            });
         }
+    }
+
+    /// WASM reads the picked file asynchronously; a cancelled dialog drops the sender.
+    fn poll_import(&mut self) {
+        let Some(received) = self.import_rx.as_ref().map(|rx| rx.try_recv()) else {
+            return;
+        };
+        match received {
+            Ok(bytes) => {
+                self.import_rx = None;
+                self.import_scan(&bytes);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => self.import_rx = None,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Replaces the shown result and inputs with the imported scan's. The
+    /// molecules are cleared: they no longer match what the panel describes.
+    fn import_scan(&mut self, bytes: &[u8]) {
+        // A running scan streams into `plot_cache`; an import would mix into it.
+        if !matches!(self.status, ComputeStatus::Idle) {
+            self.error = Some("Import ignored: a scan is running".into());
+            return;
+        }
+        let result = match ComputeResult::from_bytes(bytes) {
+            Ok(result) => result,
+            Err(e) => return self.error = Some(format!("Import failed: {e:#}")),
+        };
+        let model = &result.settings.model;
+        let warning = Model::from_name(model)
+            .is_none()
+            .then(|| format!("Imported scan uses model '{model}', which the panel can't select"));
+        self.error = warning.or_else(|| (!self.gpu_available).then(|| NO_GPU.to_string()));
+        self.inputs = ScanInputs::from_settings(&result.settings, self.inputs.model);
+        // Molecules, including uploads or fetches still in flight, no longer
+        // match the panel, which now describes the imported scan.
+        self.mol1 = None;
+        self.mol2 = None;
+        self.file_rx = None;
+        self.install_result(result);
     }
 
     fn download_csv(&self) {
@@ -813,19 +979,7 @@ impl DuelloApp {
                 p.r, p.free_energy, p.mean_energy
             ));
         }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(path) = rfd::FileDialog::new().set_file_name("pmf.csv").save_file() {
-                if let Err(e) = std::fs::write(&path, &csv) {
-                    log::error!("Failed to save CSV: {e}");
-                }
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            download_string_as_file(&csv, "pmf.csv");
-        }
+        self.download_string(&csv, "pmf.csv");
     }
 }
 
@@ -855,14 +1009,14 @@ async fn fetch_url(url: &str) -> anyhow::Result<Vec<u8>> {
     Ok(array.to_vec())
 }
 
-/// Trigger a browser file download from a string (WASM only).
+/// Trigger a browser file download (WASM only).
 #[cfg(target_arch = "wasm32")]
-fn download_string_as_file(content: &str, filename: &str) {
+fn download_bytes_as_file(content: &[u8], filename: &str) {
     use wasm_bindgen::JsCast;
     let window = web_sys::window().unwrap();
     let document = window.document().unwrap();
-    let blob = web_sys::Blob::new_with_str_sequence(&js_sys::Array::of1(
-        &wasm_bindgen::JsValue::from_str(content),
+    let blob = web_sys::Blob::new_with_u8_array_sequence(&js_sys::Array::of1(
+        &js_sys::Uint8Array::from(content),
     ))
     .unwrap();
     let url = web_sys::Url::create_object_url_with_blob(&blob).unwrap();
@@ -878,6 +1032,7 @@ impl eframe::App for DuelloApp {
         self.poll_result();
         self.poll_progress();
         self.poll_file_upload();
+        self.poll_import();
 
         let ctx = ui.ctx().clone();
         let is_dark = ui.visuals().dark_mode;
@@ -904,5 +1059,45 @@ impl eframe::App for DuelloApp {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.ui_center_panel(ui, is_dark);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_names_from_archives_map_back_to_ui_models() {
+        assert_eq!(Model::from_name("kimhummer"), Some(Model::KimHummer));
+        assert_eq!(Model::from_name("Calvados3"), Some(Model::Calvados3));
+        assert_eq!(Model::from_name("custom topology"), None);
+    }
+
+    #[test]
+    fn imported_settings_restore_the_inputs_they_came_from() {
+        let inputs = ScanInputs {
+            model: Model::Pasquier,
+            cg: CgPolicy::Multi,
+            ph: 4.5,
+            homo_dimer: true,
+            ..Default::default()
+        };
+        let restored = ScanInputs::from_settings(&ScanSettings::from(&inputs), Model::Calvados3);
+        assert_eq!(
+            (restored.model, restored.cg, restored.ph),
+            (Model::Pasquier, CgPolicy::Multi, 4.5)
+        );
+        assert!(restored.homo_dimer);
+    }
+
+    /// The panel must still show the scan's numbers when its model isn't selectable.
+    #[test]
+    fn unknown_models_keep_the_current_choice_but_restore_settings() {
+        let mut settings = ScanSettings::from(&ScanInputs::default());
+        settings.model = "custom topology".into();
+        settings.molarity = 0.5;
+        let restored = ScanInputs::from_settings(&settings, Model::KimHummer);
+        assert_eq!(restored.model, Model::KimHummer);
+        assert_eq!(restored.molarity, 0.5);
     }
 }

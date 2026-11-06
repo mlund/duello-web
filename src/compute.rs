@@ -1,4 +1,4 @@
-use crate::app::{CgPolicy, ScanInputs};
+use crate::app::ScanInputs;
 use duello::web_api::{ScanProgress, WebScanRequest, WebScanResult};
 use std::ops::ControlFlow;
 
@@ -15,19 +15,7 @@ fn build_request(inputs: &ScanInputs, mol1_pdb: Vec<u8>, mol2_pdb: Vec<u8>) -> W
     WebScanRequest {
         mol1_pdb,
         mol2_pdb,
-        ph: inputs.ph,
-        model: inputs.model.name().to_string(),
-        single_bead: inputs.cg == CgPolicy::Single,
-        rmin: inputs.rmin,
-        rmax: inputs.rmax,
-        dr: inputs.dr,
-        molarity: inputs.molarity,
-        temperature: inputs.temperature,
-        max_ndiv: inputs.max_ndiv,
-        gradient_threshold: inputs.gradient_threshold,
-        cutoff: inputs.cutoff,
-        grid_size: inputs.grid_size,
-        homo_dimer: inputs.homo_dimer,
+        settings: inputs.into(),
     }
 }
 
