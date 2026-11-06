@@ -5,7 +5,7 @@
 use crate::app::save_file;
 use duello::archive::ScanArchive;
 use duello::nbody::{
-    box_length, HsyFluid, NBodyRun, Progress, RunSpec, ScatteringCurve, Stage,
+    box_length, HsyFluid, MsaOverrides, NBodyRun, Progress, RunSpec, ScatteringCurve, Stage,
     PARTIAL_SPECIFIC_VOLUME, RESIDUE_FORM_FACTORS,
 };
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
@@ -135,6 +135,11 @@ pub struct ManybodyTab {
     translation: f64,
     rotation: f64,
     tune_steps: bool,
+    msa: MsaOverrides,
+    /// The scan `msa` was chosen for.
+    msa_scan: Option<HsyFluid>,
+    /// Last (sphere, q_min) checked for an MSA solution, and the answer.
+    msa_check: Option<(HsyFluid, f64, bool)>,
     run: Option<NBodyRun>,
     running: bool,
     /// Sweeps per UI frame, tuned to `FRAME_BUDGET_MS`.
@@ -174,6 +179,9 @@ impl Default for ManybodyTab {
             translation: defaults.translation,
             rotation: defaults.rotation,
             tune_steps: true,
+            msa: MsaOverrides::default(),
+            msa_scan: None,
+            msa_check: None,
             run: None,
             running: false,
             sweeps_per_frame: 10,
@@ -235,8 +243,8 @@ impl ManybodyTab {
                 .show(ui, |ui| self.ui_mc_inputs(ui))
                 .header_response
                 .on_hover_text("Copies and move steps; the defaults suit most runs");
+            self.ui_msa(ui, archive);
         });
-        self.ui_msa(ui, archive);
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
@@ -358,14 +366,39 @@ impl ManybodyTab {
 
     /// The charged sphere for the inputs above, i.e. the next run's
     /// dashed S(q); a running or paused run keeps its own.
-    fn ui_msa(&self, ui: &mut egui::Ui, archive: &ScanArchive) {
+    fn ui_msa(&mut self, ui: &mut egui::Ui, archive: &ScanArchive) {
         section(ui, "MSA reference");
-        let fluid = HsyFluid::for_scan(archive, self.millimolar * 1e-3);
-        ui.label(format!("Diameter σ = {:.1} Å", fluid.diameter))
-            .on_hover_text(format!(
-                "Sphere of the molecule's volume: molar mass × {PARTIAL_SPECIFIC_VOLUME} \
-                 cm³/g, a typical protein partial specific volume"
-            ));
+        let derived = HsyFluid::for_scan(archive, self.millimolar * 1e-3);
+        // Overrides chosen for one molecule or solution mean nothing for
+        // another scan; the 1 M sphere tags the scan without the concentration.
+        let scan = HsyFluid::for_scan(archive, 1.0);
+        if self.msa_scan.as_ref() != Some(&scan) {
+            self.msa = MsaOverrides::default();
+            self.msa_scan = Some(scan);
+        }
+        grid("manybody_msa").show(ui, |ui| {
+            overridable(
+                ui,
+                "Diameter σ",
+                &mut self.msa.diameter,
+                derived.diameter,
+                &format!(
+                    "Hard-sphere diameter. Default: a sphere of the molecule's volume, \
+                     molar mass × {PARTIAL_SPECIFIC_VOLUME} cm³/g (a typical protein \
+                     partial specific volume)"
+                ),
+            );
+            overridable(
+                ui,
+                "Debye length",
+                &mut self.msa.debye_length,
+                derived.debye_length,
+                "Screening length κ⁻¹ of the Yukawa repulsion. Default: the scan's salt \
+                 plus the protein counterions, as in the MPB-RMSA of Kaieda et al. 2014 \
+                 (the MC table screens with salt only)",
+            );
+        });
+        let fluid = derived.overridden(&self.msa);
         ui.label(format!(
             "Volume fraction φ = {:.4}",
             fluid.volume_fraction()
@@ -373,14 +406,23 @@ impl ManybodyTab {
         .on_hover_text("Number density × πσ³/6");
         ui.label(format!("Charge Z = {:+.1} e", fluid.charge))
             .on_hover_text("Net charge of the scanned molecule");
-        ui.label("Screening includes counterions").on_hover_text(
-            "Rescaled MSA (MPB-RMSA) as in Kaieda et al. 2014; unlike the MC table, \
-             κ counts the protein counterions as well as the salt",
-        );
         let q_min = std::f64::consts::TAU / self.box_length();
-        if fluid.structure_factor(&[q_min]).is_none() {
+        if !self.msa_solvable(fluid, q_min) {
             ui.colored_label(egui::Color32::YELLOW, "No MSA solution: curve not shown")
                 .on_hover_text("Too dense or too strongly repulsive for the rescaling");
+        }
+    }
+
+    /// The panel redraws every frame; the solve is only redone when the
+    /// sphere or q_min changes.
+    fn msa_solvable(&mut self, fluid: HsyFluid, q_min: f64) -> bool {
+        match &self.msa_check {
+            Some((checked, q, solvable)) if *checked == fluid && *q == q_min => *solvable,
+            _ => {
+                let solvable = fluid.structure_factor(&[q_min]).is_some();
+                self.msa_check = Some((fluid, q_min, solvable));
+                solvable
+            }
         }
     }
 
@@ -396,6 +438,7 @@ impl ManybodyTab {
         spec.translation = self.translation;
         spec.rotation = self.rotation;
         spec.tune_steps = self.tune_steps;
+        spec.msa = self.msa;
         if !self.detailed {
             // Mass-centre frames cost little next to the sweeps between them.
             spec.sweeps_per_frame = spec.sweeps_per_check;
@@ -661,6 +704,45 @@ impl ManybodyTab {
             Ok(()) => {}
         }
     }
+}
+
+/// A length that shows its derived default until edited; the reset button
+/// returns to tracking the default.
+fn overridable(
+    ui: &mut egui::Ui,
+    label: &str,
+    choice: &mut Option<f64>,
+    default: f64,
+    hover: &str,
+) {
+    ui.label(label).on_hover_text(hover);
+    ui.horizontal(|ui| {
+        let mut value = choice.unwrap_or(default);
+        let edited = ui
+            .add(
+                egui::DragValue::new(&mut value)
+                    .range(0.1..=1e4)
+                    // Else a default outside the range is clamped, which
+                    // counts as an edit and stores an override.
+                    .clamp_existing_to_range(false)
+                    .speed(0.1)
+                    .max_decimals(1)
+                    .suffix(" Å"),
+            )
+            .on_hover_text(hover)
+            .changed();
+        if edited {
+            *choice = Some(value);
+        }
+        let reset = ui
+            .add_enabled(choice.is_some(), egui::Button::new("↺").small())
+            .on_hover_text(format!("Back to the default, {default:.1} Å"))
+            .on_disabled_hover_text("Showing the default");
+        if reset.clicked() {
+            *choice = None;
+        }
+    });
+    ui.end_row();
 }
 
 /// A Twobody-style heading: rule, bold title.

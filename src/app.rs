@@ -71,7 +71,6 @@ pub struct ScanInputs {
     pub molarity: f64,
     pub temperature: f64,
     pub max_ndiv: usize,
-    /// Not in `ScanSettings`; an imported scan's table records it.
     pub subdivision: Subdivision,
     pub gradient_threshold: f64,
     pub cutoff: f64,
@@ -98,6 +97,7 @@ impl From<&ScanInputs> for ScanSettings {
             cutoff: inputs.cutoff,
             grid_size: inputs.grid_size,
             homo_dimer: inputs.homo_dimer,
+            subdivision: inputs.subdivision,
         }
     }
 }
@@ -113,7 +113,7 @@ impl ScanInputs {
             molarity: s.molarity,
             temperature: s.temperature,
             max_ndiv: s.max_ndiv,
-            subdivision: Subdivision::default(),
+            subdivision: s.subdivision,
             gradient_threshold: s.gradient_threshold,
             cutoff: s.cutoff,
             grid_size: s.grid_size,
@@ -1073,7 +1073,6 @@ impl DuelloApp {
             .then(|| format!("Imported scan uses model '{model}', which the panel can't select"));
         self.error = warning.or_else(|| (!self.gpu_available).then(|| NO_GPU.to_string()));
         self.inputs = ScanInputs::from_settings(&result.settings, self.inputs.model);
-        self.inputs.subdivision = result.subdivision();
         // Molecules, including uploads or fetches still in flight, no longer
         // match the panel, which now describes the imported scan.
         self.mol1 = None;
@@ -1227,6 +1226,7 @@ mod tests {
             cg: CgPolicy::Multi,
             ph: 4.5,
             homo_dimer: true,
+            subdivision: Subdivision::Lattice,
             ..Default::default()
         };
         let restored = ScanInputs::from_settings(&ScanSettings::from(&inputs), Model::Calvados3);
@@ -1234,6 +1234,7 @@ mod tests {
             (restored.model, restored.cg, restored.ph),
             (Model::Pasquier, CgPolicy::Multi, 4.5)
         );
+        assert_eq!(restored.subdivision, Subdivision::Lattice);
         assert!(restored.homo_dimer);
     }
 

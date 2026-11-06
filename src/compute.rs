@@ -20,7 +20,6 @@ fn build_request(inputs: &ScanInputs, mol1_pdb: Vec<u8>, mol2_pdb: Vec<u8>) -> W
         mol1_pdb,
         mol2_pdb,
         settings,
-        subdivision: inputs.subdivision,
     }
 }
 
@@ -77,6 +76,6 @@ mod tests {
             ..Default::default()
         };
         let request = build_request(&inputs, vec![], vec![]);
-        assert_eq!(request.subdivision, Subdivision::Lattice);
+        assert_eq!(request.settings.subdivision, Subdivision::Lattice);
     }
 }
