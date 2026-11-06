@@ -340,7 +340,7 @@ impl ManybodyTab {
         // After the row: saving reports errors through `&mut self`, which
         // the borrow of `run` above rules out inside it.
         let saved = if csv {
-            save_file(curve_csv(run).as_bytes(), "manybody.csv").map_err(anyhow::Error::from)
+            save_file(run.report_csv().as_bytes(), "manybody.csv").map_err(anyhow::Error::from)
         } else if trajectory {
             run.trajectory_bytes()
                 .and_then(|bytes| Ok(save_file(&bytes, "manybody.traj")?))
@@ -353,18 +353,4 @@ impl ManybodyTab {
             Ok(()) => {}
         }
     }
-}
-
-/// q, I, P, S_eff and its error, one row per q.
-fn curve_csv(run: &NBodyRun) -> String {
-    let curve = run.curve();
-    let mut csv = String::from("q/Å⁻¹,I,P,S_eff,S_eff_error\n");
-    for k in 0..curve.q.len() {
-        let error = curve.s_eff_error.as_ref().map_or(f64::NAN, |e| e[k]);
-        csv += &format!(
-            "{:.5},{:.6e},{:.6e},{:.5},{:.5}\n",
-            curve.q[k], curve.intensity[k], curve.form_factor[k], curve.s_eff[k], error
-        );
-    }
-    csv
 }
