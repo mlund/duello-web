@@ -217,11 +217,11 @@ impl ManybodyTab {
     pub fn ui(&mut self, ui: &mut egui::Ui, archive: Option<&ScanArchive>) {
         egui::Panel::left("manybody_inputs")
             .min_size(220.0)
-            .show_inside(ui, |ui| self.ui_inputs(ui, archive));
+            .show(ui, |ui| self.ui_inputs(ui, archive));
         egui::Panel::bottom("manybody_stats")
             .min_size(80.0)
-            .show_inside(ui, |ui| self.ui_stats(ui));
-        egui::CentralPanel::default().show_inside(ui, |ui| self.ui_plot(ui));
+            .show(ui, |ui| self.ui_stats(ui));
+        egui::CentralPanel::default().show(ui, |ui| self.ui_plot(ui));
     }
 
     fn ui_inputs(&mut self, ui: &mut egui::Ui, archive: Option<&ScanArchive>) {

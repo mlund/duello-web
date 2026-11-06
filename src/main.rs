@@ -4,6 +4,9 @@ mod manybody;
 #[cfg(not(target_arch = "wasm32"))]
 mod version;
 
+/// The 3D viewer's impostor shaders depth-test, so the surface needs a depth buffer.
+const DEPTH_BITS: u8 = 24;
+
 fn main() -> eframe::Result {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -11,6 +14,7 @@ fn main() -> eframe::Result {
         let native_options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default().with_inner_size([1024.0, 720.0]),
             renderer: eframe::Renderer::Wgpu,
+            depth_buffer: DEPTH_BITS,
             ..Default::default()
         };
         eframe::run_native(
@@ -25,7 +29,10 @@ fn main() -> eframe::Result {
         console_error_panic_hook::set_once();
         console_log::init_with_level(log::Level::Info).expect("Failed to init console_log");
 
-        let web_options = eframe::WebOptions::default();
+        let web_options = eframe::WebOptions {
+            depth_buffer: DEPTH_BITS,
+            ..Default::default()
+        };
         wasm_bindgen_futures::spawn_local(async {
             let document = web_sys::window().unwrap().document().unwrap();
             let canvas = document

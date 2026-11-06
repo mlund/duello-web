@@ -1164,7 +1164,7 @@ impl eframe::App for DuelloApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
-        egui::Panel::top("tabs").show_inside(ui, |ui| {
+        egui::Panel::top("tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Twobody, "Twobody")
                     .on_hover_text(
@@ -1190,7 +1190,7 @@ impl DuelloApp {
     fn ui_twobody(&mut self, ui: &mut egui::Ui, is_dark: bool) {
         egui::Panel::left("inputs")
             .min_size(220.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     self.ui_left_panel(ui);
                 });
@@ -1198,11 +1198,11 @@ impl DuelloApp {
 
         egui::Panel::bottom("results")
             .min_size(80.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 self.ui_bottom_panel(ui);
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.ui_center_panel(ui, is_dark);
         });
     }
