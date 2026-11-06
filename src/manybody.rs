@@ -4,7 +4,7 @@
 use crate::app::save_file;
 use duello::archive::ScanArchive;
 use duello::nbody::{box_length, NBodyRun, Progress, RunSpec, Stage, RESIDUE_FORM_FACTORS};
-use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points, Polygon};
+use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -263,11 +263,12 @@ impl ManybodyTab {
             ui.centered_and_justified(|ui| ui.label("Start a run to see I(q)."));
             return;
         };
-        let color = ui.visuals().hyperlink_color;
+        let color = curve_color(ui.visuals().dark_mode);
         // Until production frames exist (also when stopped while
         // equilibrating), the energy trace is all there is to show.
         if self.progress.map_or(0, |p| p.frames) == 0 {
             Plot::new("energy_trace")
+                .legend(egui_plot::Legend::default())
                 .x_axis_label("Sweeps")
                 .y_axis_label("U / N (kT)")
                 .show(ui, |plot| {
@@ -295,21 +296,19 @@ impl ManybodyTab {
             View::FormFactor => &curve.form_factor,
         };
         let points = series(&curve.q, values, axes);
-        let band = (self.view == View::StructureFactor)
+        let bars = (self.view == View::StructureFactor)
             .then_some(curve.s_eff_error.as_ref())
             .flatten()
-            .map(|errors| band_quads(&curve.q, &curve.s_eff, errors, axes));
+            .map(|errors| error_bars(&curve.q, &curve.s_eff, errors, axes));
         // One id per view and scale, so each fits its own bounds when shown.
         Plot::new(("manybody_plot", self.view.label(), axes.x, axes.y))
+            .legend(egui_plot::Legend::default())
             .x_axis_label(log_label("q (Å⁻¹)", axes.x))
             .y_axis_label(log_label(self.view.axis_label(), axes.y))
             .show(ui, |plot| {
-                for quad in band.into_iter().flatten() {
-                    plot.polygon(
-                        Polygon::new("±1σ", PlotPoints::from(quad))
-                            .fill_color(color.gamma_multiply(0.25))
-                            .width(0.0_f32),
-                    );
+                for bar in bars.into_iter().flatten() {
+                    // Unnamed, so the legend lists only the curve.
+                    plot.line(Line::new("", PlotPoints::from(bar.to_vec())).color(color));
                 }
                 marked_line(plot, self.view.label(), points, color);
             });
@@ -411,7 +410,16 @@ fn log_label(label: &str, log: bool) -> String {
     }
 }
 
-/// Symbols joined by a thin line: the symbols mark the sampled q-values.
+/// The Twobody tab's PMF blue, so both tabs read alike.
+fn curve_color(dark_mode: bool) -> egui::Color32 {
+    if dark_mode {
+        egui::Color32::from_rgb(100, 150, 255)
+    } else {
+        egui::Color32::from_rgb(30, 60, 180)
+    }
+}
+
+/// Twobody style: a line through symbols marking the sampled points.
 fn marked_line(
     plot: &mut egui_plot::PlotUi,
     name: &str,
@@ -421,29 +429,23 @@ fn marked_line(
     plot.line(
         Line::new(name, PlotPoints::from(points.clone()))
             .color(color)
-            .width(1.0_f32),
+            .width(3.0_f32),
     );
+    // Unnamed, so the legend lists each series once.
     plot.points(
-        Points::new(name, PlotPoints::from(points))
+        Points::new("", PlotPoints::from(points))
+            .color(color)
             .shape(MarkerShape::Circle)
-            .filled(true)
-            .radius(4.0_f32)
-            .color(color),
+            .radius(4.0_f32),
     );
 }
 
-/// The ±σ band as one quad per q interval: egui_plot fills only convex
-/// polygons, and a band over a wiggly curve is not convex.
-fn band_quads(q: &[f64], values: &[f64], errors: &[f64], axes: LogAxes) -> Vec<Vec<[f64; 2]>> {
-    let corner = |k: usize, sign: f64| point(q[k], values[k] + sign * errors[k], axes);
-    (1..q.len())
+/// Vertical ±σ bars, one per q; a bar whose end has no logarithm is left out.
+fn error_bars(q: &[f64], values: &[f64], errors: &[f64], axes: LogAxes) -> Vec<[[f64; 2]; 2]> {
+    (0..q.len())
         .filter_map(|k| {
-            Some(vec![
-                corner(k - 1, -1.0)?,
-                corner(k, -1.0)?,
-                corner(k, 1.0)?,
-                corner(k - 1, 1.0)?,
-            ])
+            let end = |sign: f64| point(q[k], values[k] + sign * errors[k], axes);
+            Some([end(-1.0)?, end(1.0)?])
         })
         .collect()
 }
