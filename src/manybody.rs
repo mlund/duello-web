@@ -138,6 +138,8 @@ pub struct ManybodyTab {
     msa: MsaOverrides,
     /// The scan `msa` was chosen for.
     msa_scan: Option<HsyFluid>,
+    /// Why a live run refused the last MSA change.
+    msa_error: Option<String>,
     /// Last (sphere, q_min) checked for an MSA solution, and the answer.
     msa_check: Option<(HsyFluid, f64, bool)>,
     run: Option<NBodyRun>,
@@ -181,6 +183,7 @@ impl Default for ManybodyTab {
             tune_steps: true,
             msa: MsaOverrides::default(),
             msa_scan: None,
+            msa_error: None,
             msa_check: None,
             run: None,
             running: false,
@@ -243,8 +246,9 @@ impl ManybodyTab {
                 .show(ui, |ui| self.ui_mc_inputs(ui))
                 .header_response
                 .on_hover_text("Copies and move steps; the defaults suit most runs");
-            self.ui_msa(ui, archive);
         });
+        // Theory only: editable while a run goes, which takes each change.
+        self.ui_msa(ui, archive);
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
@@ -364,52 +368,75 @@ impl ManybodyTab {
         });
     }
 
-    /// The charged sphere for the inputs above, i.e. the next run's
-    /// dashed S(q); a running or paused run keeps its own.
+    /// A live (running or paused) run shows and takes edits to its own
+    /// sphere; otherwise the section previews the next run from the inputs.
     fn ui_msa(&mut self, ui: &mut egui::Ui, archive: &ScanArchive) {
         section(ui, "MSA reference");
-        let derived = HsyFluid::for_scan(archive, self.millimolar * 1e-3);
-        // Overrides chosen for one molecule or solution mean nothing for
-        // another scan; the 1 M sphere tags the scan without the concentration.
+        let (derived, before) = match self.live_run().map(NBodyRun::msa) {
+            Some(msa) => (msa.derived().clone(), msa.overrides()),
+            None => (self.next_run_sphere(archive), self.msa),
+        };
+        let mut overrides = before;
+        msa_fields(ui, &mut overrides, &derived);
+        if overrides != before {
+            self.choose_msa(overrides);
+        }
+        let (sphere, solved) = match self.live_run().map(NBodyRun::msa) {
+            Some(msa) => (msa.sphere().clone(), msa.solved()),
+            None => {
+                let sphere = derived.overridden(&self.msa);
+                let q_min = std::f64::consts::TAU / self.box_length();
+                (sphere.clone(), self.msa_solvable(sphere, q_min))
+            }
+        };
+        ui.label(format!(
+            "Volume fraction φ = {:.4}",
+            sphere.volume_fraction()
+        ))
+        .on_hover_text("Number density × πσ³/6");
+        ui.label(format!("Charge Z = {:+.1} e", sphere.charge))
+            .on_hover_text("Net charge of the scanned molecule");
+        if !solved {
+            ui.colored_label(egui::Color32::YELLOW, "No MSA solution: curve not shown")
+                .on_hover_text("Too dense or too strongly repulsive for the rescaling");
+        }
+        if let Some(e) = &self.msa_error {
+            ui.colored_label(egui::Color32::RED, e);
+        }
+    }
+
+    /// Not stopped, so its theory curve is still the one being watched.
+    fn live_run(&self) -> Option<&NBodyRun> {
+        self.run.as_ref().filter(|_| !self.stopped())
+    }
+
+    fn stopped(&self) -> bool {
+        self.progress.is_some_and(|p| p.stage == Stage::Stopped)
+    }
+
+    /// Overrides chosen for one molecule or solution mean nothing for
+    /// another scan, so a new scan clears them; the 1 M sphere tags the scan
+    /// without the concentration.
+    fn next_run_sphere(&mut self, archive: &ScanArchive) -> HsyFluid {
         let scan = HsyFluid::for_scan(archive, 1.0);
         if self.msa_scan.as_ref() != Some(&scan) {
             self.msa = MsaOverrides::default();
             self.msa_scan = Some(scan);
         }
-        grid("manybody_msa").show(ui, |ui| {
-            overridable(
-                ui,
-                "Diameter σ",
-                &mut self.msa.diameter,
-                derived.diameter,
-                &format!(
-                    "Hard-sphere diameter. Default: a sphere of the molecule's volume, \
-                     molar mass × {PARTIAL_SPECIFIC_VOLUME} cm³/g (a typical protein \
-                     partial specific volume)"
-                ),
-            );
-            overridable(
-                ui,
-                "Debye length",
-                &mut self.msa.debye_length,
-                derived.debye_length,
-                "Screening length κ⁻¹ of the Yukawa repulsion. Default: the scan's salt \
-                 plus the protein counterions, as in the MPB-RMSA of Kaieda et al. 2014 \
-                 (the MC table screens with salt only)",
-            );
-        });
-        let fluid = derived.overridden(&self.msa);
-        ui.label(format!(
-            "Volume fraction φ = {:.4}",
-            fluid.volume_fraction()
-        ))
-        .on_hover_text("Number density × πσ³/6");
-        ui.label(format!("Charge Z = {:+.1} e", fluid.charge))
-            .on_hover_text("Net charge of the scanned molecule");
-        let q_min = std::f64::consts::TAU / self.box_length();
-        if !self.msa_solvable(fluid, q_min) {
-            ui.colored_label(egui::Color32::YELLOW, "No MSA solution: curve not shown")
-                .on_hover_text("Too dense or too strongly repulsive for the rescaling");
+        HsyFluid::for_scan(archive, self.millimolar * 1e-3)
+    }
+
+    /// A live run takes the change or refuses it, keeping its reference; the
+    /// next run starts from the last accepted choice either way.
+    fn choose_msa(&mut self, overrides: MsaOverrides) {
+        let stopped = self.stopped();
+        let live = self.run.as_mut().filter(|_| !stopped);
+        self.msa_error = match live.map(|run| run.set_msa(overrides)) {
+            Some(Err(e)) => Some(format!("{e:#}")),
+            _ => None,
+        };
+        if self.msa_error.is_none() {
+            self.msa = overrides;
         }
     }
 
@@ -704,6 +731,31 @@ impl ManybodyTab {
             Ok(()) => {}
         }
     }
+}
+
+fn msa_fields(ui: &mut egui::Ui, overrides: &mut MsaOverrides, derived: &HsyFluid) {
+    grid("manybody_msa").show(ui, |ui| {
+        overridable(
+            ui,
+            "Diameter σ",
+            &mut overrides.diameter,
+            derived.diameter,
+            &format!(
+                "Hard-sphere diameter. Default: a sphere of the molecule's volume, \
+                 molar mass × {PARTIAL_SPECIFIC_VOLUME} cm³/g (a typical protein \
+                 partial specific volume)"
+            ),
+        );
+        overridable(
+            ui,
+            "Debye length",
+            &mut overrides.debye_length,
+            derived.debye_length,
+            "Screening length κ⁻¹ of the Yukawa repulsion. Default: the scan's salt \
+             plus the protein counterions, as in the MPB-RMSA of Kaieda et al. 2014 \
+             (the MC table screens with salt only)",
+        );
+    });
 }
 
 /// A length that shows its derived default until edited; the reset button
