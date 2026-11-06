@@ -1,5 +1,6 @@
 mod app;
 mod compute;
+mod manybody;
 #[cfg(not(target_arch = "wasm32"))]
 mod version;
 

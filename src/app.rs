@@ -202,6 +202,15 @@ pub struct DuelloApp {
     file_rx: Option<mpsc::Receiver<(u8, String, Vec<u8>)>>,
     /// Bytes of a scan archive picked for import.
     import_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    tab: Tab,
+    manybody: crate::manybody::ManybodyTab,
+}
+
+/// Two-body scan, or many-body MC built on the loaded scan.
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Twobody,
+    Manybody,
 }
 
 impl DuelloApp {
@@ -232,6 +241,8 @@ impl DuelloApp {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             file_rx: None,
             import_rx: None,
+            tab: Tab::Twobody,
+            manybody: Default::default(),
         }
     }
 
@@ -872,14 +883,9 @@ impl DuelloApp {
 
     /// Save failures only reach the log, as before the scan export existed.
     fn download_string(&self, content: &str, filename: &str) {
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(path) = rfd::FileDialog::new().set_file_name(filename).save_file() {
-            if let Err(e) = std::fs::write(&path, content) {
-                log::error!("Failed to save {filename}: {e}");
-            }
+        if let Err(e) = save_file(content.as_bytes(), filename) {
+            log::error!("Failed to save {filename}: {e}");
         }
-        #[cfg(target_arch = "wasm32")]
-        download_bytes_as_file(content.as_bytes(), filename);
     }
 
     /// Native asks for the path first: serializing the table can take a while,
@@ -1009,6 +1015,17 @@ async fn fetch_url(url: &str) -> anyhow::Result<Vec<u8>> {
     Ok(array.to_vec())
 }
 
+/// Native: a save dialog (cancel is not an error). Browser: a download.
+pub(crate) fn save_file(content: &[u8], filename: &str) -> std::io::Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(path) = rfd::FileDialog::new().set_file_name(filename).save_file() {
+        std::fs::write(path, content)?;
+    }
+    #[cfg(target_arch = "wasm32")]
+    download_bytes_as_file(content, filename);
+    Ok(())
+}
+
 /// Trigger a browser file download (WASM only).
 #[cfg(target_arch = "wasm32")]
 fn download_bytes_as_file(content: &[u8], filename: &str) {
@@ -1042,6 +1059,26 @@ impl eframe::App for DuelloApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
+        egui::Panel::top("tabs").show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.tab, Tab::Twobody, "Twobody");
+                ui.selectable_value(&mut self.tab, Tab::Manybody, "Manybody");
+            });
+        });
+        self.manybody.tick();
+        match self.tab {
+            Tab::Twobody => self.ui_twobody(ui, is_dark),
+            Tab::Manybody => self.manybody.ui(ui, self.result.as_ref()),
+        }
+        // A running many-body simulation advances once per frame.
+        if self.manybody.is_running() {
+            ctx.request_repaint();
+        }
+    }
+}
+
+impl DuelloApp {
+    fn ui_twobody(&mut self, ui: &mut egui::Ui, is_dark: bool) {
         egui::Panel::left("inputs")
             .min_size(220.0)
             .show_inside(ui, |ui| {
