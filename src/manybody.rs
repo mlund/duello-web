@@ -70,6 +70,8 @@ pub struct ManybodyTab {
     energy_trace: Vec<[f64; 2]>,
     view: View,
     log_axes: [LogAxes; 3],
+    /// Whether the energy plot tracks the recent range; see `recent_range`.
+    follow_energy: bool,
     error: Option<String>,
     /// What the current run was started with, so editing the inputs or
     /// loading another scan doesn't relabel its results.
@@ -96,6 +98,7 @@ impl Default for ManybodyTab {
             energy_trace: Vec::new(),
             view: View::StructureFactor,
             log_axes: DEFAULT_LOG_AXES,
+            follow_energy: true,
             error: None,
             run_info: None,
         }
@@ -209,6 +212,7 @@ impl ManybodyTab {
                 self.error = None;
                 self.progress = None;
                 self.energy_trace.clear();
+                self.follow_energy = true;
                 self.sweeps_per_frame = 10;
             }
             Err(e) => self.error = Some(format!("{e:#}")),
@@ -300,13 +304,7 @@ impl ManybodyTab {
         // Until production frames exist (also when stopped while
         // equilibrating), the energy trace is all there is to show.
         if self.progress.map_or(0, |p| p.frames) == 0 {
-            Plot::new("energy_trace")
-                .legend(egui_plot::Legend::default())
-                .x_axis_label("Sweeps")
-                .y_axis_label("U / N (kT)")
-                .show(ui, |plot| {
-                    marked_line(plot, "U/N", self.energy_trace.clone(), color)
-                });
+            self.ui_energy_trace(ui, color);
             return;
         }
         let axes = &mut self.log_axes[self.view as usize];
@@ -345,6 +343,31 @@ impl ManybodyTab {
                 }
                 marked_line(plot, self.view.label(), points, color);
             });
+    }
+
+    /// Follows the recent energy range until the user drags or zooms;
+    /// double-click resumes following.
+    fn ui_energy_trace(&mut self, ui: &mut egui::Ui, color: egui::Color32) {
+        let follow = self.follow_energy;
+        let trace = &self.energy_trace;
+        let response = Plot::new("energy_trace")
+            .legend(egui_plot::Legend::default())
+            .x_axis_label("Sweeps")
+            .y_axis_label("U / N (kT)")
+            .show(ui, |plot| {
+                marked_line(plot, "U/N", trace.clone(), color);
+                if let Some((lo, hi)) = recent_range(trace).filter(|_| follow) {
+                    plot.set_plot_bounds_y(lo..=hi);
+                }
+            })
+            .response;
+        let zoomed = response.hovered()
+            && ui.input(|i| i.zoom_delta() != 1.0 || i.smooth_scroll_delta != egui::Vec2::ZERO);
+        if response.double_clicked() {
+            self.follow_energy = true;
+        } else if response.dragged() || zoomed {
+            self.follow_energy = false;
+        }
     }
 
     fn ui_stats(&mut self, ui: &mut egui::Ui) {
@@ -452,6 +475,21 @@ fn curve_color(dark_mode: bool) -> egui::Color32 {
     }
 }
 
+/// U-range over the last half of the sweeps, where the run still drifts
+/// slowly; the early drop would otherwise flatten it.
+fn recent_range(trace: &[[f64; 2]]) -> Option<(f64, f64)> {
+    let half = trace.last()?[0] / 2.0;
+    let (lo, hi) = trace
+        .iter()
+        .filter(|[sweep, _]| *sweep >= half)
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), [_, u]| {
+            (lo.min(*u), hi.max(*u))
+        });
+    // A flat trace still needs a visible span.
+    let pad = 0.05 * (hi - lo).max(1e-3 * lo.abs().max(1.0));
+    Some((lo - pad, hi + pad))
+}
+
 /// Twobody style: a line through symbols marking the sampled points.
 fn marked_line(
     plot: &mut egui_plot::PlotUi,
@@ -481,4 +519,35 @@ fn error_bars(q: &[f64], values: &[f64], errors: &[f64], axes: LogAxes) -> Vec<[
             Some([end(-1.0)?, end(1.0)?])
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A large initial drop must not set the scale: only the last half of
+    /// the sweeps counts, padded by 5% of its span.
+    #[test]
+    fn recent_range_ignores_the_initial_drop() {
+        let trace = [
+            [0.0, 100.0],
+            [10.0, 10.0],
+            [20.0, -1.0],
+            [30.0, -2.0],
+            [40.0, -3.0],
+        ];
+        let (lo, hi) = recent_range(&trace).unwrap();
+        // Sweeps ≥ 20: U from −3 to −1, span 2, pad 0.1.
+        assert!(
+            (lo + 3.1).abs() < 1e-12 && (hi + 0.9).abs() < 1e-12,
+            "{lo} {hi}"
+        );
+    }
+
+    #[test]
+    fn recent_range_of_a_flat_trace_is_not_empty() {
+        let (lo, hi) = recent_range(&[[0.0, 5.0], [10.0, 5.0]]).unwrap();
+        assert!(lo < 5.0 && hi > 5.0);
+        assert!(recent_range(&[]).is_none());
+    }
 }
