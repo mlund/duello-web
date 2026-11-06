@@ -3,6 +3,7 @@
 use super::RunInfo;
 use crate::files::save_file;
 use duello::nbody::{NBodyRun, Progress, Stage};
+use std::borrow::Cow;
 
 /// A download's outcome goes to `error`: set on failure, cleared on success.
 pub fn show(
@@ -20,7 +21,7 @@ pub fn show(
             "Trajectory reached its size cap; recording stopped",
         );
     }
-    match downloads(ui, run) {
+    match downloads(ui, run, progress) {
         Some(Err(e)) => *error = Some(format!("Save failed: {e:#}")),
         Some(Ok(())) => *error = None,
         None => {}
@@ -81,25 +82,58 @@ fn sampling(ui: &mut egui::Ui, run: &NBodyRun, progress: Progress, info: RunInfo
     ));
 }
 
+#[derive(Clone, Copy)]
+enum Download {
+    Curve,
+    PairCorrelation,
+    Trajectory,
+}
+
 /// `Some` when a download was asked for: whether saving it worked.
-fn downloads(ui: &mut egui::Ui, run: &NBodyRun) -> Option<anyhow::Result<()>> {
-    let (mut csv, mut trajectory) = (false, false);
+fn downloads(ui: &mut egui::Ui, run: &NBodyRun, progress: Progress) -> Option<anyhow::Result<()>> {
+    let mut pick = None;
     ui.horizontal(|ui| {
-        csv = ui
-            .button("Curve (.csv)")
-            .on_hover_text("Scattering curves and run statistics")
-            .clicked();
-        trajectory = ui
-            .button("Trajectory (.traj)")
-            .on_hover_text("Production frames: positions and orientations")
-            .clicked();
+        let mut button = |enabled: bool, label: &str, hover: &str, kind: Download| {
+            let clicked = ui
+                .add_enabled(enabled, egui::Button::new(label))
+                .on_hover_text(hover)
+                .on_disabled_hover_text("Available once production frames exist")
+                .clicked();
+            if clicked {
+                pick = Some(kind);
+            }
+        };
+        button(
+            true,
+            "Curve (.csv)",
+            "Scattering curves and run statistics",
+            Download::Curve,
+        );
+        button(
+            progress.frames > 0,
+            "g(r) (.csv)",
+            "Mass-centre radial distribution; error bars need two or more copies",
+            Download::PairCorrelation,
+        );
+        button(
+            true,
+            "Trajectory (.traj)",
+            "Production frames: positions and orientations",
+            Download::Trajectory,
+        );
     });
-    if csv {
-        let saved = save_file(run.report_csv().as_bytes(), "manybody.csv");
-        return Some(saved.map_err(anyhow::Error::from));
-    }
-    trajectory.then(|| {
-        run.trajectory_bytes()
-            .and_then(|bytes| Ok(save_file(&bytes, "manybody.traj")?))
-    })
+    Some(save(run, pick?))
+}
+
+fn save(run: &NBodyRun, kind: Download) -> anyhow::Result<()> {
+    // Cow: the trajectory can be large, so it is saved without a copy.
+    let (bytes, name): (Cow<[u8]>, _) = match kind {
+        Download::Curve => (run.report_csv().into_bytes().into(), "manybody.csv"),
+        Download::PairCorrelation => {
+            let csv = run.pair_correlation().to_csv();
+            (csv.into_bytes().into(), "manybody.rdf.csv")
+        }
+        Download::Trajectory => (run.trajectory_bytes()?, "manybody.traj"),
+    };
+    Ok(save_file(&bytes, name)?)
 }

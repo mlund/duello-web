@@ -1,7 +1,7 @@
-//! Manybody plots: the energy trace and the scattering curves. Views,
+//! Manybody plots: the energy trace, the scattering curves and g(r). Views,
 //! log scaling and error bars stay in here.
 
-use duello::nbody::ScatteringCurve;
+use duello::nbody::{RdfCurve, ScatteringCurve};
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -126,12 +126,14 @@ impl Default for ScatteringView {
     }
 }
 
-/// `detailed` runs also offer the bead-level I(q) and P(q).
+/// `detailed` runs also offer the bead-level I(q) and P(q). Plots take the
+/// run's id so each run starts fitted to its own data.
 pub fn scattering(
     ui: &mut egui::Ui,
     curve: &ScatteringCurve,
     state: &mut ScatteringView,
     detailed: bool,
+    run_id: u64,
 ) {
     if !state.view.offered(detailed) {
         state.view = View::StructureFactor;
@@ -143,15 +145,22 @@ pub fn scattering(
     let dark = ui.visuals().dark_mode;
     // One id per view and scale, so each fits its own bounds when shown.
     // Also per series set, so S_eff appearing doesn't inherit stale bounds.
-    Plot::new(("manybody_plot", view.label(), axes.x, axes.y, detailed))
-        .legend(egui_plot::Legend::default())
-        .x_axis_label(log_label("q (Å⁻¹)", axes.x))
-        .y_axis_label(log_label(view.axis_label(), axes.y))
-        .show(ui, |plot| {
-            for s in &all {
-                draw_series(plot, &curve.q, s, axes, dark);
-            }
-        });
+    Plot::new((
+        "manybody_plot",
+        run_id,
+        view.label(),
+        axes.x,
+        axes.y,
+        detailed,
+    ))
+    .legend(egui_plot::Legend::default())
+    .x_axis_label(log_label("q (Å⁻¹)", axes.x))
+    .y_axis_label(log_label(view.axis_label(), axes.y))
+    .show(ui, |plot| {
+        for s in &all {
+            draw_series(plot, &curve.q, s, axes, dark);
+        }
+    });
 }
 
 fn scattering_controls(ui: &mut egui::Ui, state: &mut ScatteringView, detailed: bool) {
@@ -173,12 +182,32 @@ fn scattering_controls(ui: &mut egui::Ui, state: &mut ScatteringView, detailed: 
     });
 }
 
+/// g(r) with copy error bars against the uncorrelated g = 1. Linear axes:
+/// g is order one and its zeros (overlap) are part of the story.
+pub fn pair_correlation(ui: &mut egui::Ui, curve: &RdfCurve, run_id: u64) {
+    let g = Series::new("g(r)", &curve.g, curve.error.as_deref(), Style::Primary);
+    let linear = LogAxes { x: false, y: false };
+    let dark = ui.visuals().dark_mode;
+    let ideal = egui_plot::HLine::new("uncorrelated, g = 1", 1.0)
+        .color(style_color(Style::Reference, dark))
+        .width(2.0_f32)
+        .style(egui_plot::LineStyle::dashed_dense());
+    Plot::new(("pair_correlation", run_id))
+        .legend(egui_plot::Legend::default())
+        .x_axis_label("r (Å)")
+        .y_axis_label("g(r)")
+        .show(ui, |plot| {
+            draw_series(plot, &curve.r, &g, linear, dark);
+            plot.hline(ideal);
+        });
+}
+
 /// (sweep, U/N) points. Follows the recent energy range until the user
 /// drags or zooms; double-click resumes following.
-pub fn energy(ui: &mut egui::Ui, trace: &[[f64; 2]], follow: &mut bool) {
+pub fn energy(ui: &mut egui::Ui, trace: &[[f64; 2]], follow: &mut bool, run_id: u64) {
     let color = curve_color(ui.visuals().dark_mode);
     let following = *follow;
-    let response = Plot::new("energy_trace")
+    let response = Plot::new(("energy_trace", run_id))
         .legend(egui_plot::Legend::default())
         .x_axis_label("Sweeps")
         .y_axis_label("U / N (kT)")

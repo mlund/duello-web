@@ -55,6 +55,9 @@ pub struct ManybodyTab {
     /// What the current run was started with, so editing the inputs or
     /// loading another scan doesn't relabel its results.
     run_info: Option<RunInfo>,
+    /// Bumped per run, so plots fit each run's data instead of keeping
+    /// the last run's zoom.
+    run_id: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -91,6 +94,7 @@ impl Default for ManybodyTab {
             follow_energy: true,
             error: None,
             run_info: None,
+            run_id: 0,
         }
     }
 }
@@ -128,7 +132,7 @@ impl ManybodyTab {
         match pane {
             Pane::Energy => self.ui_energy(ui),
             Pane::Scattering => self.ui_scattering_pane(ui),
-            Pane::PairCorrelation => placeholder(ui, "g(r) is not available yet."),
+            Pane::PairCorrelation => self.ui_pair_correlation(ui),
             Pane::Stats => self.ui_stats(ui),
             Pane::Simulation => placeholder(ui, "The 3D view is not available yet."),
         }
@@ -138,18 +142,36 @@ impl ManybodyTab {
         if self.energy_trace.is_empty() {
             return placeholder(ui, "Start a run to see the energy trace.");
         }
-        plots::energy(ui, &self.energy_trace, &mut self.follow_energy);
+        plots::energy(ui, &self.energy_trace, &mut self.follow_energy, self.run_id);
     }
 
     fn ui_scattering_pane(&mut self, ui: &mut egui::Ui) {
+        let Some(run) = self.produced_run(ui, "S(q)") else {
+            return;
+        };
+        let detailed = self.run_info.is_some_and(|i| i.detailed);
+        let id = self.run_id;
+        plots::scattering(ui, &run.curve(), &mut self.scattering, detailed, id);
+    }
+
+    fn ui_pair_correlation(&mut self, ui: &mut egui::Ui) {
+        if let Some(run) = self.produced_run(ui, "g(r)") {
+            plots::pair_correlation(ui, &run.pair_correlation(), self.run_id);
+        }
+    }
+
+    /// The run once it has production frames; until then a placeholder
+    /// saying what `what` waits for.
+    fn produced_run(&self, ui: &mut egui::Ui, what: &str) -> Option<&NBodyRun> {
         let Some(run) = &self.run else {
-            return placeholder(ui, "Start a run to see S(q).");
+            placeholder(ui, &format!("Start a run to see {what}."));
+            return None;
         };
         if self.progress.is_none_or(|p| p.frames == 0) {
-            return placeholder(ui, "No production frames yet.");
+            placeholder(ui, "No production frames yet.");
+            return None;
         }
-        let detailed = self.run_info.is_some_and(|i| i.detailed);
-        plots::scattering(ui, &run.curve(), &mut self.scattering, detailed);
+        Some(run)
     }
 
     fn ui_stats(&mut self, ui: &mut egui::Ui) {
@@ -422,6 +444,7 @@ impl ManybodyTab {
                     tune_steps: self.tune_steps,
                 });
                 self.running = true;
+                self.run_id += 1;
                 self.error = None;
                 self.progress = None;
                 self.energy_trace.clear();
