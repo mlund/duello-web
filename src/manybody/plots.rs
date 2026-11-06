@@ -25,6 +25,8 @@ struct Series<'a> {
     /// Where copies give them.
     errors: Option<&'a [f64]>,
     style: Style,
+    /// Symbols at each point; off for dense curves such as g(r).
+    markers: bool,
 }
 
 impl<'a> Series<'a> {
@@ -34,6 +36,14 @@ impl<'a> Series<'a> {
             values,
             errors,
             style,
+            markers: true,
+        }
+    }
+
+    fn without_markers(self) -> Self {
+        Self {
+            markers: false,
+            ..self
         }
     }
 }
@@ -153,7 +163,7 @@ pub fn scattering(
         axes.y,
         detailed,
     ))
-    .legend(egui_plot::Legend::default())
+    .legend(curve_legend())
     .x_axis_label(log_label("q (Å⁻¹)", axes.x))
     .y_axis_label(log_label(view.axis_label(), axes.y))
     .show(ui, |plot| {
@@ -185,7 +195,7 @@ fn scattering_controls(ui: &mut egui::Ui, state: &mut ScatteringView, detailed: 
 /// g(r) with copy error bars against the uncorrelated g = 1. Linear axes:
 /// g is order one and its zeros (overlap) are part of the story.
 pub fn pair_correlation(ui: &mut egui::Ui, curve: &RdfCurve, run_id: u64) {
-    let g = Series::new("g(r)", &curve.g, curve.error.as_deref(), Style::Primary);
+    let g = Series::new("g(r)", &curve.g, curve.error.as_deref(), Style::Primary).without_markers();
     let linear = LogAxes { x: false, y: false };
     let dark = ui.visuals().dark_mode;
     let ideal = egui_plot::HLine::new("uncorrelated, g = 1", 1.0)
@@ -193,7 +203,7 @@ pub fn pair_correlation(ui: &mut egui::Ui, curve: &RdfCurve, run_id: u64) {
         .width(2.0_f32)
         .style(egui_plot::LineStyle::dashed_dense());
     Plot::new(("pair_correlation", run_id))
-        .legend(egui_plot::Legend::default())
+        .legend(curve_legend())
         .x_axis_label("r (Å)")
         .y_axis_label("g(r)")
         .show(ui, |plot| {
@@ -302,7 +312,20 @@ fn draw_series(
     {
         plot.line(Line::new(s.name, PlotPoints::from(bar.to_vec())).color(color));
     }
-    marked_line(plot, s.name, points, color);
+    if s.markers {
+        marked_line(plot, s.name, points, color);
+    } else {
+        plot.line(
+            Line::new(s.name, PlotPoints::from(points))
+                .color(color)
+                .width(3.0_f32),
+        );
+    }
+}
+
+/// Lower right, clear of the low-q rise and g(r)'s contact peak on the left.
+fn curve_legend() -> egui_plot::Legend {
+    egui_plot::Legend::default().position(egui_plot::Corner::RightBottom)
 }
 
 /// U-range over the last half of the sweeps, where the run still drifts
