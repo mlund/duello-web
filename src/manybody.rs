@@ -128,11 +128,9 @@ impl ManybodyTab {
 
     fn ui_inputs(&mut self, ui: &mut egui::Ui, archive: Option<&ScanArchive>) {
         ui.strong("Many-body system");
-        // Stop and errors don't depend on the loaded scan, which may have
-        // changed since the run started.
-        if self.running && ui.button("Stop").clicked() {
-            self.stop();
-        }
+        // Run controls and errors don't depend on the loaded scan, which
+        // may have changed since the run started.
+        self.ui_run_controls(ui);
         if let Some(e) = &self.error {
             ui.colored_label(egui::Color32::RED, e);
         }
@@ -213,6 +211,41 @@ impl ManybodyTab {
                 self.energy_trace.clear();
                 self.sweeps_per_frame = 10;
             }
+            Err(e) => self.error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Pause keeps the run, unlike Stop; a paused run can also be
+    /// replaced by pressing Run.
+    fn ui_run_controls(&mut self, ui: &mut egui::Ui) {
+        let stage = self.progress.map(|p| p.stage);
+        let live = self.run.is_some() && stage != Some(Stage::Stopped);
+        if !live {
+            return;
+        }
+        ui.horizontal(|ui| {
+            let pause = if self.running { "Pause" } else { "Resume" };
+            if ui.button(pause).clicked() {
+                self.running = !self.running;
+            }
+            if ui.button("Stop").clicked() {
+                self.stop();
+            }
+        });
+        let producing = matches!(stage, Some(Stage::Production { .. }));
+        let reset = ui
+            .add_enabled(producing, egui::Button::new("Reset statistics"))
+            .on_hover_text("Discard production frames so far and keep sampling")
+            .on_disabled_hover_text("Available once production starts");
+        if reset.clicked() {
+            self.reset_statistics();
+        }
+    }
+
+    fn reset_statistics(&mut self) {
+        let Some(run) = &mut self.run else { return };
+        match run.reset_statistics() {
+            Ok(progress) => self.progress = Some(progress),
             Err(e) => self.error = Some(format!("{e:#}")),
         }
     }
