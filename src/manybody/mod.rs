@@ -47,8 +47,6 @@ pub struct ManybodyTab {
     /// Sweeps per UI frame, tuned to `FRAME_BUDGET_MS`.
     sweeps_per_frame: u64,
     progress: Option<Progress>,
-    /// (sweep, U/N) while equilibrating.
-    energy_trace: Vec<[f64; 2]>,
     scattering: plots::ScatteringView,
     /// Whether the energy plot tracks the recent range; see `recent_range`.
     follow_energy: bool,
@@ -94,7 +92,6 @@ impl Default for ManybodyTab {
             running: false,
             sweeps_per_frame: 10,
             progress: None,
-            energy_trace: Vec::new(),
             scattering: Default::default(),
             follow_energy: true,
             error: None,
@@ -146,10 +143,11 @@ impl ManybodyTab {
     }
 
     fn ui_energy(&mut self, ui: &mut egui::Ui) {
-        if self.energy_trace.is_empty() {
+        let trace = self.run.as_ref().map_or(&[][..], NBodyRun::energy_trace);
+        if trace.is_empty() {
             return placeholder(ui, "Start a run to see the energy trace.");
         }
-        plots::energy(ui, &self.energy_trace, &mut self.follow_energy, self.run_id);
+        plots::energy(ui, trace, &mut self.follow_energy, self.run_id);
     }
 
     fn ui_scattering_pane(&mut self, ui: &mut egui::Ui) {
@@ -476,7 +474,6 @@ impl ManybodyTab {
                 self.run_id += 1;
                 self.error = None;
                 self.progress = None;
-                self.energy_trace.clear();
                 self.follow_energy = true;
                 self.sweeps_per_frame = 10;
             }
@@ -553,11 +550,6 @@ impl ManybodyTab {
                 return;
             }
         };
-        if was_equilibrating {
-            // Includes the step on which equilibration ended.
-            self.energy_trace
-                .push([progress.sweep as f64, progress.energy_per_body]);
-        }
         self.progress = Some(progress);
         if was_equilibrating && progress.stage != Stage::Equilibrating {
             // Production steps cost far more per sweep: start the budget over.
