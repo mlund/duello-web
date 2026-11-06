@@ -213,8 +213,28 @@ enum Tab {
     Manybody,
 }
 
+/// egui's bundled fonts lack math glyphs such as ⟨⟩ and ⁻¹, which then show
+/// as boxes. A DejaVu Sans subset (Latin, Greek, scripts, arrows, math;
+/// license in assets/) fills the gaps without changing the default look.
+fn install_fallback_font(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "dejavu".into(),
+        egui::FontData::from_static(include_bytes!("../assets/DejaVuSans-subset.ttf")).into(),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("dejavu".into());
+    }
+    ctx.set_fonts(fonts);
+}
+
 impl DuelloApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        install_fallback_font(&cc.egui_ctx);
         // On WASM, we can't synchronously check GPU availability (pollster::block_on panics).
         // Assume available; errors will surface when the scan actually starts.
         #[cfg(target_arch = "wasm32")]

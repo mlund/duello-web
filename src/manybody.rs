@@ -4,7 +4,7 @@
 use crate::app::save_file;
 use duello::archive::ScanArchive;
 use duello::nbody::{box_length, NBodyRun, Progress, RunSpec, Stage, RESIDUE_FORM_FACTORS};
-use egui_plot::{Line, Plot, PlotPoints};
+use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points, Polygon};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -20,6 +20,26 @@ enum View {
     StructureFactor,
     Intensity,
     FormFactor,
+}
+
+impl View {
+    const ALL: [View; 3] = [View::StructureFactor, View::Intensity, View::FormFactor];
+
+    fn label(self) -> &'static str {
+        match self {
+            View::StructureFactor => "S_eff(q)",
+            View::Intensity => "I(q)",
+            View::FormFactor => "P(q)",
+        }
+    }
+
+    fn axis_label(self) -> &'static str {
+        match self {
+            View::StructureFactor => "S_eff",
+            View::Intensity => "log₁₀ I",
+            View::FormFactor => "log₁₀ P",
+        }
+    }
 }
 
 pub struct ManybodyTab {
@@ -240,50 +260,44 @@ impl ManybodyTab {
                 });
             return;
         }
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.view, View::StructureFactor, "S_eff(q)");
-            ui.selectable_value(&mut self.view, View::Intensity, "I(q)");
-            ui.selectable_value(&mut self.view, View::FormFactor, "P(q)");
-        });
+        egui::ComboBox::from_label("Plot")
+            .selected_text(self.view.label())
+            .show_ui(ui, |ui| {
+                for view in View::ALL {
+                    ui.selectable_value(&mut self.view, view, view.label());
+                }
+            });
         let curve = run.curve();
-        let points = |values: &[f64], log: bool| -> Vec<[f64; 2]> {
-            curve
-                .q
-                .iter()
-                .zip(values)
-                .filter(|(_, v)| !log || **v > 0.0)
-                .map(|(q, v)| [*q, if log { v.log10() } else { *v }])
-                .collect()
+        let (values, log) = match self.view {
+            View::StructureFactor => (&curve.s_eff, false),
+            View::Intensity => (&curve.intensity, true),
+            View::FormFactor => (&curve.form_factor, true),
         };
-        let (label, series) = match self.view {
-            View::StructureFactor => ("S_eff", points(&curve.s_eff, false)),
-            View::Intensity => ("log₁₀ I", points(&curve.intensity, true)),
-            View::FormFactor => ("log₁₀ P", points(&curve.form_factor, true)),
-        };
+        let points = series(&curve.q, values, log);
         let band = (self.view == View::StructureFactor)
             .then_some(curve.s_eff_error.as_ref())
             .flatten()
-            .map(|errors| {
-                let shifted = |sign: f64| -> Vec<[f64; 2]> {
-                    curve
-                        .q
-                        .iter()
-                        .zip(&curve.s_eff)
-                        .zip(errors)
-                        .map(|((q, s), e)| [*q, s + sign * e])
-                        .collect()
-                };
-                (shifted(1.0), shifted(-1.0))
-            });
-        Plot::new("manybody_plot")
+            .map(|errors| band_quads(&curve.q, &curve.s_eff, errors));
+        let color = ui.visuals().hyperlink_color;
+        // One id per view, so each fits its own bounds when shown.
+        Plot::new(("manybody_plot", self.view.label()))
             .x_axis_label("q (Å⁻¹)")
-            .y_axis_label(label)
+            .y_axis_label(self.view.axis_label())
             .show(ui, |plot| {
-                plot.line(Line::new(label, PlotPoints::from(series)).width(2.0_f32));
-                if let Some((upper, lower)) = band {
-                    plot.line(Line::new("+1σ", PlotPoints::from(upper)).width(0.5_f32));
-                    plot.line(Line::new("−1σ", PlotPoints::from(lower)).width(0.5_f32));
+                for quad in band.into_iter().flatten() {
+                    plot.polygon(
+                        Polygon::new("±1σ", PlotPoints::from(quad))
+                            .fill_color(color.gamma_multiply(0.25))
+                            .width(0.0_f32),
+                    );
                 }
+                plot.points(
+                    Points::new(self.view.label(), PlotPoints::from(points))
+                        .shape(MarkerShape::Circle)
+                        .filled(true)
+                        .radius(2.5_f32)
+                        .color(color),
+                );
             });
     }
 
@@ -353,4 +367,25 @@ impl ManybodyTab {
             Ok(()) => {}
         }
     }
+}
+
+/// (q, value) points; on a log scale non-positive values are dropped.
+fn series(q: &[f64], values: &[f64], log: bool) -> Vec<[f64; 2]> {
+    q.iter()
+        .zip(values)
+        .filter(|(_, v)| !log || **v > 0.0)
+        .map(|(q, v)| [*q, if log { v.log10() } else { *v }])
+        .collect()
+}
+
+/// The ±σ band as one quad per q interval: egui_plot fills only convex
+/// polygons, and a band over a wiggly curve is not convex.
+fn band_quads(q: &[f64], values: &[f64], errors: &[f64]) -> Vec<Vec<[f64; 2]>> {
+    let edge = |k: usize| (values[k] - errors[k], values[k] + errors[k]);
+    (1..q.len())
+        .map(|k| {
+            let ((lo0, hi0), (lo1, hi1)) = (edge(k - 1), edge(k));
+            vec![[q[k - 1], lo0], [q[k], lo1], [q[k], hi1], [q[k - 1], hi0]]
+        })
+        .collect()
 }
