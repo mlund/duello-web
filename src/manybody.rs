@@ -33,14 +33,29 @@ impl View {
         }
     }
 
+    /// I and P are per molecule, i.e. I/c up to contrast and molar mass.
     fn axis_label(self) -> &'static str {
         match self {
             View::StructureFactor => "S_eff",
-            View::Intensity => "log₁₀ I",
-            View::FormFactor => "log₁₀ P",
+            View::Intensity => "I(q)/c (relative)",
+            View::FormFactor => "P(q) (relative)",
         }
     }
 }
+
+#[derive(Clone, Copy)]
+struct LogAxes {
+    x: bool,
+    y: bool,
+}
+
+/// Per view, indexed by `View as usize`: S_eff is read linearly, I and P
+/// as log I vs q, the usual protein SAXS figure.
+const DEFAULT_LOG_AXES: [LogAxes; 3] = [
+    LogAxes { x: false, y: false },
+    LogAxes { x: false, y: true },
+    LogAxes { x: false, y: true },
+];
 
 pub struct ManybodyTab {
     n_bodies: usize,
@@ -54,6 +69,7 @@ pub struct ManybodyTab {
     /// (sweep, U/N) while equilibrating.
     energy_trace: Vec<[f64; 2]>,
     view: View,
+    log_axes: [LogAxes; 3],
     error: Option<String>,
     /// What the current run was started with, so editing the inputs or
     /// loading another scan doesn't relabel its results.
@@ -79,6 +95,7 @@ impl Default for ManybodyTab {
             progress: None,
             energy_trace: Vec::new(),
             view: View::StructureFactor,
+            log_axes: DEFAULT_LOG_AXES,
             error: None,
             run_info: None,
         }
@@ -246,6 +263,7 @@ impl ManybodyTab {
             ui.centered_and_justified(|ui| ui.label("Start a run to see I(q)."));
             return;
         };
+        let color = ui.visuals().hyperlink_color;
         // Until production frames exist (also when stopped while
         // equilibrating), the energy trace is all there is to show.
         if self.progress.map_or(0, |p| p.frames) == 0 {
@@ -253,36 +271,38 @@ impl ManybodyTab {
                 .x_axis_label("Sweeps")
                 .y_axis_label("U / N (kT)")
                 .show(ui, |plot| {
-                    plot.line(Line::new(
-                        "U/N",
-                        PlotPoints::from(self.energy_trace.clone()),
-                    ));
+                    marked_line(plot, "U/N", self.energy_trace.clone(), color)
                 });
             return;
         }
-        egui::ComboBox::from_label("Plot")
-            .selected_text(self.view.label())
-            .show_ui(ui, |ui| {
-                for view in View::ALL {
-                    ui.selectable_value(&mut self.view, view, view.label());
-                }
-            });
+        let axes = &mut self.log_axes[self.view as usize];
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_label("Plot")
+                .selected_text(self.view.label())
+                .show_ui(ui, |ui| {
+                    for view in View::ALL {
+                        ui.selectable_value(&mut self.view, view, view.label());
+                    }
+                });
+            ui.checkbox(&mut axes.x, "log q");
+            ui.checkbox(&mut axes.y, "log y");
+        });
+        let axes = self.log_axes[self.view as usize];
         let curve = run.curve();
-        let (values, log) = match self.view {
-            View::StructureFactor => (&curve.s_eff, false),
-            View::Intensity => (&curve.intensity, true),
-            View::FormFactor => (&curve.form_factor, true),
+        let values = match self.view {
+            View::StructureFactor => &curve.s_eff,
+            View::Intensity => &curve.intensity,
+            View::FormFactor => &curve.form_factor,
         };
-        let points = series(&curve.q, values, log);
+        let points = series(&curve.q, values, axes);
         let band = (self.view == View::StructureFactor)
             .then_some(curve.s_eff_error.as_ref())
             .flatten()
-            .map(|errors| band_quads(&curve.q, &curve.s_eff, errors));
-        let color = ui.visuals().hyperlink_color;
-        // One id per view, so each fits its own bounds when shown.
-        Plot::new(("manybody_plot", self.view.label()))
-            .x_axis_label("q (Å⁻¹)")
-            .y_axis_label(self.view.axis_label())
+            .map(|errors| band_quads(&curve.q, &curve.s_eff, errors, axes));
+        // One id per view and scale, so each fits its own bounds when shown.
+        Plot::new(("manybody_plot", self.view.label(), axes.x, axes.y))
+            .x_axis_label(log_label("q (Å⁻¹)", axes.x))
+            .y_axis_label(log_label(self.view.axis_label(), axes.y))
             .show(ui, |plot| {
                 for quad in band.into_iter().flatten() {
                     plot.polygon(
@@ -291,13 +311,7 @@ impl ManybodyTab {
                             .width(0.0_f32),
                     );
                 }
-                plot.points(
-                    Points::new(self.view.label(), PlotPoints::from(points))
-                        .shape(MarkerShape::Circle)
-                        .filled(true)
-                        .radius(2.5_f32)
-                        .color(color),
-                );
+                marked_line(plot, self.view.label(), points, color);
             });
     }
 
@@ -369,23 +383,67 @@ impl ManybodyTab {
     }
 }
 
-/// (q, value) points; on a log scale non-positive values are dropped.
-fn series(q: &[f64], values: &[f64], log: bool) -> Vec<[f64; 2]> {
+/// egui_plot has no log axes, so log scales plot log₁₀ of the data;
+/// non-positive values have no logarithm and are dropped.
+fn scaled(v: f64, log: bool) -> Option<f64> {
+    match log {
+        false => Some(v),
+        true => (v > 0.0).then(|| v.log10()),
+    }
+}
+
+fn point(q: f64, v: f64, axes: LogAxes) -> Option<[f64; 2]> {
+    Some([scaled(q, axes.x)?, scaled(v, axes.y)?])
+}
+
+fn series(q: &[f64], values: &[f64], axes: LogAxes) -> Vec<[f64; 2]> {
     q.iter()
         .zip(values)
-        .filter(|(_, v)| !log || **v > 0.0)
-        .map(|(q, v)| [*q, if log { v.log10() } else { *v }])
+        .filter_map(|(&q, &v)| point(q, v, axes))
         .collect()
+}
+
+fn log_label(label: &str, log: bool) -> String {
+    if log {
+        format!("log₁₀ {label}")
+    } else {
+        label.to_string()
+    }
+}
+
+/// Symbols joined by a thin line: the symbols mark the sampled q-values.
+fn marked_line(
+    plot: &mut egui_plot::PlotUi,
+    name: &str,
+    points: Vec<[f64; 2]>,
+    color: egui::Color32,
+) {
+    plot.line(
+        Line::new(name, PlotPoints::from(points.clone()))
+            .color(color)
+            .width(1.0_f32),
+    );
+    plot.points(
+        Points::new(name, PlotPoints::from(points))
+            .shape(MarkerShape::Circle)
+            .filled(true)
+            .radius(4.0_f32)
+            .color(color),
+    );
 }
 
 /// The ±σ band as one quad per q interval: egui_plot fills only convex
 /// polygons, and a band over a wiggly curve is not convex.
-fn band_quads(q: &[f64], values: &[f64], errors: &[f64]) -> Vec<Vec<[f64; 2]>> {
-    let edge = |k: usize| (values[k] - errors[k], values[k] + errors[k]);
+fn band_quads(q: &[f64], values: &[f64], errors: &[f64], axes: LogAxes) -> Vec<Vec<[f64; 2]>> {
+    let corner = |k: usize, sign: f64| point(q[k], values[k] + sign * errors[k], axes);
     (1..q.len())
-        .map(|k| {
-            let ((lo0, hi0), (lo1, hi1)) = (edge(k - 1), edge(k));
-            vec![[q[k - 1], lo0], [q[k], lo1], [q[k], hi1], [q[k - 1], hi0]]
+        .filter_map(|k| {
+            Some(vec![
+                corner(k - 1, -1.0)?,
+                corner(k, -1.0)?,
+                corner(k, 1.0)?,
+                corner(k - 1, 1.0)?,
+            ])
         })
         .collect()
 }
