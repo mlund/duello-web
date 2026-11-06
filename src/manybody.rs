@@ -3,7 +3,9 @@
 
 use crate::app::save_file;
 use duello::archive::ScanArchive;
-use duello::nbody::{box_length, NBodyRun, Progress, RunSpec, Stage, RESIDUE_FORM_FACTORS};
+use duello::nbody::{
+    box_length, NBodyRun, Progress, RunSpec, ScatteringCurve, Stage, RESIDUE_FORM_FACTORS,
+};
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -18,16 +20,23 @@ const FRAME_BUDGET_MS: f64 = 30.0;
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     StructureFactor,
+    MassCentre,
     Intensity,
     FormFactor,
 }
 
 impl View {
-    const ALL: [View; 3] = [View::StructureFactor, View::Intensity, View::FormFactor];
+    const ALL: [View; 4] = [
+        View::StructureFactor,
+        View::MassCentre,
+        View::Intensity,
+        View::FormFactor,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             View::StructureFactor => "S_eff(q)",
+            View::MassCentre => "S_com(q)",
             View::Intensity => "I(q)",
             View::FormFactor => "P(q)",
         }
@@ -37,9 +46,33 @@ impl View {
     fn axis_label(self) -> &'static str {
         match self {
             View::StructureFactor => "S_eff",
+            View::MassCentre => "S_com (mass centres)",
             View::Intensity => "I(q)/c (relative)",
             View::FormFactor => "P(q) (relative)",
         }
+    }
+
+    /// Values, with errors where copies give them.
+    fn data(self, curve: &ScatteringCurve) -> (&[f64], Option<&[f64]>) {
+        match self {
+            View::StructureFactor => (&curve.s_eff, curve.s_eff_error.as_deref()),
+            View::MassCentre => (&curve.s_com, curve.s_com_error.as_deref()),
+            View::Intensity => (&curve.intensity, None),
+            View::FormFactor => (&curve.form_factor, None),
+        }
+    }
+
+    /// S is read linearly, I and P as log I vs q, the usual protein SAXS
+    /// figure.
+    fn default_log_axes(self) -> LogAxes {
+        LogAxes {
+            x: false,
+            y: !self.is_structure_factor(),
+        }
+    }
+
+    fn is_structure_factor(self) -> bool {
+        matches!(self, View::StructureFactor | View::MassCentre)
     }
 }
 
@@ -49,18 +82,11 @@ struct LogAxes {
     y: bool,
 }
 
-/// Per view, indexed by `View as usize`: S_eff is read linearly, I and P
-/// as log I vs q, the usual protein SAXS figure.
-const DEFAULT_LOG_AXES: [LogAxes; 3] = [
-    LogAxes { x: false, y: false },
-    LogAxes { x: false, y: true },
-    LogAxes { x: false, y: true },
-];
-
 pub struct ManybodyTab {
     n_bodies: usize,
     millimolar: f64,
     copies: usize,
+    centres_only: bool,
     run: Option<NBodyRun>,
     running: bool,
     /// Sweeps per UI frame, tuned to `FRAME_BUDGET_MS`.
@@ -69,7 +95,8 @@ pub struct ManybodyTab {
     /// (sweep, U/N) while equilibrating.
     energy_trace: Vec<[f64; 2]>,
     view: View,
-    log_axes: [LogAxes; 3],
+    /// Indexed by `View as usize`.
+    log_axes: [LogAxes; View::ALL.len()],
     /// Whether the energy plot tracks the recent range; see `recent_range`.
     follow_energy: bool,
     error: Option<String>,
@@ -83,6 +110,7 @@ struct RunInfo {
     n_bodies: usize,
     millimolar: f64,
     salt_millimolar: f64,
+    centres_only: bool,
 }
 
 impl Default for ManybodyTab {
@@ -91,13 +119,14 @@ impl Default for ManybodyTab {
             n_bodies: 200,
             millimolar: 5.0,
             copies: 4,
+            centres_only: false,
             run: None,
             running: false,
             sweeps_per_frame: 10,
             progress: None,
             energy_trace: Vec::new(),
             view: View::StructureFactor,
-            log_axes: DEFAULT_LOG_AXES,
+            log_axes: View::ALL.map(View::default_log_axes),
             follow_energy: true,
             error: None,
             run_info: None,
@@ -159,6 +188,12 @@ impl ManybodyTab {
                     ui.label("Independent copies");
                     ui.add(egui::DragValue::new(&mut self.copies).range(1..=16));
                     ui.end_row();
+                    let check = RunSpec::new(1, 1.0).sweeps_per_check;
+                    ui.label("Mass centres only").on_hover_text(format!(
+                        "Skip bead scattering: S_com only, sampled every {check} sweeps"
+                    ));
+                    ui.checkbox(&mut self.centres_only, "");
+                    ui.end_row();
                 });
         });
         let can_start = self.ui_system_info(ui, archive);
@@ -200,6 +235,11 @@ impl ManybodyTab {
     fn start(&mut self, archive: &ScanArchive) {
         let mut spec = RunSpec::new(self.n_bodies, self.millimolar * 1e-3);
         spec.copies = self.copies;
+        spec.centres_only = self.centres_only;
+        if self.centres_only {
+            // Mass-centre frames cost little next to the sweeps between them.
+            spec.sweeps_per_frame = spec.sweeps_per_check;
+        }
         match NBodyRun::start(archive, spec, RESIDUE_FORM_FACTORS) {
             Ok(run) => {
                 self.run = Some(run);
@@ -207,6 +247,7 @@ impl ManybodyTab {
                     n_bodies: self.n_bodies,
                     millimolar: self.millimolar,
                     salt_millimolar: archive.settings.molarity * 1e3,
+                    centres_only: self.centres_only,
                 });
                 self.running = true;
                 self.error = None;
@@ -307,12 +348,17 @@ impl ManybodyTab {
             self.ui_energy_trace(ui, color);
             return;
         }
+        let centres_only = self.run_info.is_some_and(|i| i.centres_only);
+        let available = |v: View| !centres_only || v == View::MassCentre;
+        if !available(self.view) {
+            self.view = View::MassCentre;
+        }
         let axes = &mut self.log_axes[self.view as usize];
         ui.horizontal(|ui| {
             egui::ComboBox::from_label("Plot")
                 .selected_text(self.view.label())
                 .show_ui(ui, |ui| {
-                    for view in View::ALL {
+                    for view in View::ALL.into_iter().filter(|&v| available(v)) {
                         ui.selectable_value(&mut self.view, view, view.label());
                     }
                 });
@@ -321,17 +367,12 @@ impl ManybodyTab {
         });
         let axes = self.log_axes[self.view as usize];
         let curve = run.curve();
-        let values = match self.view {
-            View::StructureFactor => &curve.s_eff,
-            View::Intensity => &curve.intensity,
-            View::FormFactor => &curve.form_factor,
-        };
+        let (values, errors) = self.view.data(&curve);
         let points = series(&curve.q, values, axes);
-        let bars = (self.view == View::StructureFactor)
-            .then_some(curve.s_eff_error.as_ref())
-            .flatten()
-            .map(|errors| error_bars(&curve.q, &curve.s_eff, errors, axes));
-        let reference = (self.view == View::StructureFactor)
+        let bars = errors.map(|errors| error_bars(&curve.q, values, errors, axes));
+        let reference = self
+            .view
+            .is_structure_factor()
             .then(|| series(&curve.q, &curve.s_hsy, axes));
         let reference_color = reference_color(ui.visuals().dark_mode);
         // One id per view and scale, so each fits its own bounds when shown.
