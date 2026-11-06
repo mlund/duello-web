@@ -331,6 +331,9 @@ impl ManybodyTab {
             .then_some(curve.s_eff_error.as_ref())
             .flatten()
             .map(|errors| error_bars(&curve.q, &curve.s_eff, errors, axes));
+        let reference = (self.view == View::StructureFactor)
+            .then(|| series(&curve.q, &curve.s_hsy, axes));
+        let reference_color = reference_color(ui.visuals().dark_mode);
         // One id per view and scale, so each fits its own bounds when shown.
         Plot::new(("manybody_plot", self.view.label(), axes.x, axes.y))
             .legend(egui_plot::Legend::default())
@@ -342,6 +345,14 @@ impl ManybodyTab {
                     plot.line(Line::new("", PlotPoints::from(bar.to_vec())).color(color));
                 }
                 marked_line(plot, self.view.label(), points, color);
+                if let Some(reference) = reference {
+                    plot.line(
+                        Line::new("charged sphere (MPB-RMSA)", PlotPoints::from(reference))
+                            .color(reference_color)
+                            .width(2.0_f32)
+                            .style(egui_plot::LineStyle::dashed_dense()),
+                    );
+                }
             });
     }
 
@@ -472,6 +483,14 @@ fn curve_color(dark_mode: bool) -> egui::Color32 {
         egui::Color32::from_rgb(100, 150, 255)
     } else {
         egui::Color32::from_rgb(30, 60, 180)
+    }
+}
+
+fn reference_color(dark_mode: bool) -> egui::Color32 {
+    if dark_mode {
+        egui::Color32::from_rgb(255, 170, 80)
+    } else {
+        egui::Color32::from_rgb(200, 90, 0)
     }
 }
 
