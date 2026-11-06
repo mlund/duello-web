@@ -87,6 +87,8 @@ pub struct ManybodyTab {
     millimolar: f64,
     copies: usize,
     centres_only: bool,
+    /// Lattice q-vectors per |q| bin for the bead sums.
+    vectors_per_bin: usize,
     run: Option<NBodyRun>,
     running: bool,
     /// Sweeps per UI frame, tuned to `FRAME_BUDGET_MS`.
@@ -120,6 +122,7 @@ impl Default for ManybodyTab {
             millimolar: 5.0,
             copies: 4,
             centres_only: false,
+            vectors_per_bin: RunSpec::new(1, 1.0).vectors_per_bin,
             run: None,
             running: false,
             sweeps_per_frame: 10,
@@ -194,6 +197,15 @@ impl ManybodyTab {
                     ));
                     ui.checkbox(&mut self.centres_only, "");
                     ui.end_row();
+                    ui.label("q-vectors per bin").on_hover_text(
+                        "Lattice q-vectors per 2π/L bin for the bead sums: cost grows with \
+                         this; more gives smoother I(q) and S_eff",
+                    );
+                    ui.add_enabled(
+                        !self.centres_only,
+                        egui::DragValue::new(&mut self.vectors_per_bin).range(1..=500),
+                    );
+                    ui.end_row();
                 });
         });
         let can_start = self.ui_system_info(ui, archive);
@@ -236,6 +248,7 @@ impl ManybodyTab {
         let mut spec = RunSpec::new(self.n_bodies, self.millimolar * 1e-3);
         spec.copies = self.copies;
         spec.centres_only = self.centres_only;
+        spec.vectors_per_bin = self.vectors_per_bin;
         if self.centres_only {
             // Mass-centre frames cost little next to the sweeps between them.
             spec.sweeps_per_frame = spec.sweeps_per_check;
