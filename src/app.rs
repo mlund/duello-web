@@ -617,7 +617,7 @@ impl DuelloApp {
                     self.download_string(&result.topology_yaml, "topology.yaml");
                 }
                 export = ui
-                    .button("Scan (.duello)")
+                    .button("Export scan (.duello)")
                     .on_hover_text("Table, CG bodies and results; re-import without rescanning")
                     .clicked();
             });
