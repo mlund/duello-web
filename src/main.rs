@@ -1,6 +1,10 @@
 mod app;
 mod compute;
+mod files;
+mod inputs;
 mod manybody;
+mod onebody;
+mod twobody;
 #[cfg(not(target_arch = "wasm32"))]
 mod version;
 

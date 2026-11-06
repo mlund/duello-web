@@ -2,7 +2,7 @@
 //! reporting S_com(q) against charged-sphere theory, optionally bead-level
 //! I(q), P(q) and S_eff(q), and run statistics.
 
-use crate::app::save_file;
+use crate::files::save_file;
 use duello::archive::ScanArchive;
 use duello::nbody::{
     box_length, HsyFluid, MsaOverrides, NBodyRun, Progress, RunSpec, ScatteringCurve, Stage,

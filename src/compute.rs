@@ -1,4 +1,4 @@
-use crate::app::ScanInputs;
+use crate::inputs::ScanInputs;
 use duello::web_api::{ScanProgress, WebScanRequest, WebScanResult};
 use std::ops::ControlFlow;
 
