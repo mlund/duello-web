@@ -89,6 +89,10 @@ pub struct ManybodyTab {
     centres_only: bool,
     /// Lattice q-vectors per |q| bin for the bead sums.
     vectors_per_bin: usize,
+    /// Starting (or, untuned, fixed) translation (Å) and rotation (rad).
+    translation: f64,
+    rotation: f64,
+    tune_steps: bool,
     run: Option<NBodyRun>,
     running: bool,
     /// Sweeps per UI frame, tuned to `FRAME_BUDGET_MS`.
@@ -113,16 +117,21 @@ struct RunInfo {
     millimolar: f64,
     salt_millimolar: f64,
     centres_only: bool,
+    tune_steps: bool,
 }
 
 impl Default for ManybodyTab {
     fn default() -> Self {
+        let defaults = RunSpec::new(1, 1.0);
         Self {
             n_bodies: 200,
             millimolar: 5.0,
             copies: 4,
             centres_only: false,
-            vectors_per_bin: RunSpec::new(1, 1.0).vectors_per_bin,
+            vectors_per_bin: defaults.vectors_per_bin,
+            translation: defaults.translation,
+            rotation: defaults.rotation,
+            tune_steps: true,
             run: None,
             running: false,
             sweeps_per_frame: 10,
@@ -206,6 +215,29 @@ impl ManybodyTab {
                         egui::DragValue::new(&mut self.vectors_per_bin).range(1..=500),
                     );
                     ui.end_row();
+                    ui.label("Tune move steps").on_hover_text(
+                        "During equilibration, find the steps that move bodies furthest per \
+                         attempted move; frozen for production",
+                    );
+                    ui.checkbox(&mut self.tune_steps, "");
+                    ui.end_row();
+                    let start = if self.tune_steps { " (start)" } else { "" };
+                    ui.label(format!("Translation step{start} (Å)"));
+                    // Steps beyond L/2 add nothing (and are clamped).
+                    let half_box = box_length(self.n_bodies, self.millimolar * 1e-3) / 2.0;
+                    ui.add(
+                        egui::DragValue::new(&mut self.translation)
+                            .range(0.01..=half_box)
+                            .speed(0.1),
+                    );
+                    ui.end_row();
+                    ui.label(format!("Rotation step{start} (rad)"));
+                    ui.add(
+                        egui::DragValue::new(&mut self.rotation)
+                            .range(0.0..=std::f64::consts::PI)
+                            .speed(0.01),
+                    );
+                    ui.end_row();
                 });
         });
         let can_start = self.ui_system_info(ui, archive);
@@ -249,6 +281,9 @@ impl ManybodyTab {
         spec.copies = self.copies;
         spec.centres_only = self.centres_only;
         spec.vectors_per_bin = self.vectors_per_bin;
+        spec.translation = self.translation;
+        spec.rotation = self.rotation;
+        spec.tune_steps = self.tune_steps;
         if self.centres_only {
             // Mass-centre frames cost little next to the sweeps between them.
             spec.sweeps_per_frame = spec.sweeps_per_check;
@@ -261,6 +296,7 @@ impl ManybodyTab {
                     millimolar: self.millimolar,
                     salt_millimolar: archive.settings.molarity * 1e3,
                     centres_only: self.centres_only,
+                    tune_steps: self.tune_steps,
                 });
                 self.running = true;
                 self.error = None;
@@ -462,6 +498,15 @@ impl ManybodyTab {
         let show = |x: Option<f64>| x.map_or("–".to_string(), |v| format!("{v:.3}"));
         // Production statistics are empty until the first production frame.
         let produced = (stats.energy.frames > 0).then_some(());
+        let (translation, rotation) = stats.steps;
+        let tuning = if progress.stage == Stage::Equilibrating && info.tune_steps {
+            " (tuning)"
+        } else {
+            ""
+        };
+        ui.label(format!(
+            "Steps{tuning}: translate ±{translation:.2} Å, rotate ±{rotation:.3} rad"
+        ));
         ui.label(format!(
             "Acceptance: translate {}, rotate {}; ⟨Δr²⟩ {} Å², ⟨Δθ²⟩ {} rad²",
             show(stats.moves.translate.acceptance()),
