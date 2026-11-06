@@ -1,5 +1,6 @@
 use crate::compute::{ComputeResult, ComputeStatus};
 use duello::web_api::{PmfPoint, ScanProgress, ScanSettings};
+use duello::Subdivision;
 use egui_plot::{Line, MarkerShape, Plot, PlotPoint, Points};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,6 +10,13 @@ use std::sync::Arc;
 /// Kept on screen while it applies, since it explains why "Run scan" is disabled.
 const NO_GPU: &str =
     "No GPU/WebGPU adapter found. A WebGPU-capable browser is required (Chrome 113+, Edge 113+).";
+
+fn subdivision_label(scheme: Subdivision) -> &'static str {
+    match scheme {
+        Subdivision::Geodesic => "Geodesic",
+        Subdivision::Lattice => "Lattice",
+    }
+}
 
 /// Force field model choices.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,6 +71,8 @@ pub struct ScanInputs {
     pub molarity: f64,
     pub temperature: f64,
     pub max_ndiv: usize,
+    /// Not in `ScanSettings`; an imported scan's table records it.
+    pub subdivision: Subdivision,
     pub gradient_threshold: f64,
     pub cutoff: f64,
     pub grid_size: usize,
@@ -103,6 +113,7 @@ impl ScanInputs {
             molarity: s.molarity,
             temperature: s.temperature,
             max_ndiv: s.max_ndiv,
+            subdivision: Subdivision::default(),
             gradient_threshold: s.gradient_threshold,
             cutoff: s.cutoff,
             grid_size: s.grid_size,
@@ -127,6 +138,7 @@ impl Default for ScanInputs {
             molarity: 0.1,
             temperature: 298.15,
             max_ndiv: 2,
+            subdivision: Subdivision::default(),
             gradient_threshold: 0.5,
             cutoff: 20.0,
             grid_size: 200,
@@ -314,7 +326,9 @@ impl DuelloApp {
                         for model in Model::ALL {
                             ui.selectable_value(&mut self.inputs.model, model, model.label());
                         }
-                    });
+                    })
+                    .response
+                    .on_hover_text("Residue-level force field for the short-range pair energy");
                 ui.end_row();
 
                 ui.label("CG policy");
@@ -326,7 +340,9 @@ impl DuelloApp {
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.inputs.cg, CgPolicy::Single, "Single bead");
                         ui.selectable_value(&mut self.inputs.cg, CgPolicy::Multi, "Multi bead");
-                    });
+                    })
+                    .response
+                    .on_hover_text("One bead per residue, or several per residue");
                 ui.end_row();
             });
 
@@ -413,6 +429,9 @@ impl DuelloApp {
                     egui::DragValue::new(&mut self.inputs.rmax)
                         .speed(0.5)
                         .suffix(" \u{00C5}"),
+                )
+                .on_hover_text(
+                    "Largest sampled mass-centre separation; beyond it the tail is fitted",
                 );
                 ui.end_row();
 
@@ -422,20 +441,14 @@ impl DuelloApp {
                         .speed(0.1)
                         .suffix(" \u{00C5}")
                         .range(0.1..=10.0),
-                );
+                )
+                .on_hover_text("Spacing between sampled separations");
                 ui.end_row();
             });
 
         ui.add_space(4.0);
 
-        // --- Resolution ---
-        ui.label("Angular resolution");
-        ui.add(egui::Slider::new(&mut self.inputs.max_ndiv, 0..=4))
-            .on_hover_text(
-                "Number of icosphere subdivisions controlling the angular resolution. \
-                Zero means 12 vertices on the regular icosahedron; each subdivision \
-                increases the number of angular samples.",
-            );
+        self.ui_angular_mesh(ui);
 
         ui.add_space(6.0);
 
@@ -453,6 +466,9 @@ impl DuelloApp {
                                 .speed(1.0)
                                 .suffix(" \u{00C5}")
                                 .range(1.0..=500.0),
+                        )
+                        .on_hover_text(
+                            "Short-range pair potentials are splined out to this distance",
                         );
                         ui.end_row();
 
@@ -461,6 +477,10 @@ impl DuelloApp {
                             egui::DragValue::new(&mut self.inputs.gradient_threshold)
                                 .speed(0.1)
                                 .range(0.0..=10.0),
+                        )
+                        .on_hover_text(
+                            "Boltzmann-weight gradient (1/rad) above which a separation gets \
+                            the finer angular mesh; lower refines more",
                         );
                         ui.end_row();
 
@@ -469,7 +489,8 @@ impl DuelloApp {
                             egui::DragValue::new(&mut self.inputs.grid_size)
                                 .speed(10)
                                 .range(50..=1000),
-                        );
+                        )
+                        .on_hover_text("Points per pair-potential spline");
                         ui.end_row();
                     });
             });
@@ -500,11 +521,20 @@ impl DuelloApp {
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(can_run, egui::Button::new("Run scan"))
+                .on_hover_text("Tabulate the pair energy over separations and orientations")
+                .on_disabled_hover_text(
+                    "Needs both molecules (or one for a homo-dimer), valid inputs, a GPU \
+                    and no scan running",
+                )
                 .clicked()
             {
                 self.start_scan();
             }
-            if matches!(self.status, ComputeStatus::Running { .. }) && ui.button("Cancel").clicked()
+            if matches!(self.status, ComputeStatus::Running { .. })
+                && ui
+                    .button("Cancel")
+                    .on_hover_text("Abandon the running scan")
+                    .clicked()
             {
                 self.cancel_flag.store(true, Ordering::Relaxed);
                 self.abandon_scan();
@@ -512,11 +542,43 @@ impl DuelloApp {
             let idle = matches!(self.status, ComputeStatus::Idle);
             if ui
                 .add_enabled(idle, egui::Button::new("Import scan..."))
+                .on_hover_text("Load an exported .duello scan instead of running one")
                 .clicked()
             {
                 self.pick_scan_file();
             }
         });
+    }
+
+    /// Scheme and finest level of the orientation mesh.
+    fn ui_angular_mesh(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Angular mesh");
+            egui::ComboBox::from_id_salt("subdivision_combo")
+                .selected_text(subdivision_label(self.inputs.subdivision))
+                .show_ui(ui, |ui| {
+                    for scheme in [Subdivision::Geodesic, Subdivision::Lattice] {
+                        ui.selectable_value(
+                            &mut self.inputs.subdivision,
+                            scheme,
+                            subdivision_label(scheme),
+                        );
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "How each icosahedron face is subdivided. Geodesic: near-uniform \
+                    vertices, found by search. Lattice: a regular grid per face, found in \
+                    closed form (faster lookups).",
+                );
+        });
+        ui.label("Angular resolution");
+        let vertices = self.inputs.subdivision.n_vertices(self.inputs.max_ndiv);
+        ui.add(egui::Slider::new(&mut self.inputs.max_ndiv, 0..=4))
+            .on_hover_text(format!(
+                "Finest mesh level, refined only where the energy varies. Level 0 is \
+                the 12-vertex icosahedron; this level has {vertices} vertices per sphere."
+            ));
     }
 
     fn ui_center_panel(&mut self, ui: &mut egui::Ui, is_dark: bool) {
@@ -624,16 +686,32 @@ impl DuelloApp {
             // Download buttons
             let mut export = false;
             ui.horizontal_wrapped(|ui| {
-                if ui.button("PMF (.csv)").clicked() {
+                if ui
+                    .button("PMF (.csv)")
+                    .on_hover_text("Free energy and mean energy against separation")
+                    .clicked()
+                {
                     self.download_csv();
                 }
-                if ui.button("Mol 1 (.xyz)").clicked() {
+                if ui
+                    .button("Mol 1 (.xyz)")
+                    .on_hover_text("Coarse-grained beads of molecule 1")
+                    .clicked()
+                {
                     self.download_string(&result.bodies[0].to_xyz(), "mol1_cg.xyz");
                 }
-                if ui.button("Mol 2 (.xyz)").clicked() {
+                if ui
+                    .button("Mol 2 (.xyz)")
+                    .on_hover_text("Coarse-grained beads of molecule 2")
+                    .clicked()
+                {
                     self.download_string(&result.bodies[1].to_xyz(), "mol2_cg.xyz");
                 }
-                if ui.button("Topology (.yaml)").clicked() {
+                if ui
+                    .button("Topology (.yaml)")
+                    .on_hover_text("Bead kinds and pair potentials used by the scan")
+                    .clicked()
+                {
                     self.download_string(&result.topology_yaml, "topology.yaml");
                 }
                 export = ui
@@ -658,7 +736,11 @@ impl DuelloApp {
 
         let mut action = MolAction::None;
         ui.horizontal(|ui| {
-            if ui.button("Upload file...").clicked() {
+            if ui
+                .button("Upload file...")
+                .on_hover_text("Load a PDB file from disk")
+                .clicked()
+            {
                 action = MolAction::PickFile;
             }
             ui.label("or");
@@ -666,10 +748,13 @@ impl DuelloApp {
                 egui::TextEdit::singleline(pdb_id)
                     .hint_text("PDB ID")
                     .desired_width(50.0),
-            );
+            )
+            .on_hover_text("Four-character RCSB PDB code, e.g. 4LZT");
             let id_valid = pdb_id.len() == 4 && pdb_id.chars().all(|c| c.is_alphanumeric());
             if ui
                 .add_enabled(id_valid, egui::Button::new("Fetch"))
+                .on_hover_text("Download this structure from RCSB")
+                .on_disabled_hover_text("Enter a four-character PDB ID")
                 .clicked()
             {
                 action = MolAction::FetchPdb;
@@ -988,6 +1073,7 @@ impl DuelloApp {
             .then(|| format!("Imported scan uses model '{model}', which the panel can't select"));
         self.error = warning.or_else(|| (!self.gpu_available).then(|| NO_GPU.to_string()));
         self.inputs = ScanInputs::from_settings(&result.settings, self.inputs.model);
+        self.inputs.subdivision = result.subdivision();
         // Molecules, including uploads or fetches still in flight, no longer
         // match the panel, which now describes the imported scan.
         self.mol1 = None;
@@ -1081,8 +1167,12 @@ impl eframe::App for DuelloApp {
 
         egui::Panel::top("tabs").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Twobody, "Twobody");
-                ui.selectable_value(&mut self.tab, Tab::Manybody, "Manybody");
+                ui.selectable_value(&mut self.tab, Tab::Twobody, "Twobody")
+                    .on_hover_text(
+                        "Orientation-averaged potential of mean force between two molecules",
+                    );
+                ui.selectable_value(&mut self.tab, Tab::Manybody, "Manybody")
+                    .on_hover_text("Monte Carlo of many copies of the Twobody scan's molecule");
             });
         });
         self.manybody.tick();

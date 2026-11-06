@@ -5,7 +5,8 @@
 use crate::app::save_file;
 use duello::archive::ScanArchive;
 use duello::nbody::{
-    box_length, NBodyRun, Progress, RunSpec, ScatteringCurve, Stage, RESIDUE_FORM_FACTORS,
+    box_length, HsyFluid, NBodyRun, Progress, RunSpec, ScatteringCurve, Stage,
+    PARTIAL_SPECIFIC_VOLUME, RESIDUE_FORM_FACTORS,
 };
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 
@@ -115,15 +116,6 @@ impl View {
             )],
         }
     }
-
-    /// S is read linearly, I and P as log I vs q, the usual protein SAXS
-    /// figure.
-    fn default_log_axes(self) -> LogAxes {
-        LogAxes {
-            x: false,
-            y: self != View::StructureFactor,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -188,7 +180,8 @@ impl Default for ManybodyTab {
             progress: None,
             energy_trace: Vec::new(),
             view: View::StructureFactor,
-            log_axes: View::ALL.map(View::default_log_axes),
+            // Log-log spreads the low-q rise, where S and I differ most.
+            log_axes: [LogAxes { x: true, y: true }; View::ALL.len()],
             follow_energy: true,
             error: None,
             run_info: None,
@@ -221,7 +214,6 @@ impl ManybodyTab {
     }
 
     fn ui_inputs(&mut self, ui: &mut egui::Ui, archive: Option<&ScanArchive>) {
-        ui.strong("Many-body system");
         // Run controls and errors don't depend on the loaded scan, which
         // may have changed since the run started.
         self.ui_run_controls(ui);
@@ -233,104 +225,61 @@ impl ManybodyTab {
             return;
         };
         let idle = !self.running;
+        let mut fits = true;
         ui.add_enabled_ui(idle, |ui| {
-            egui::Grid::new("manybody_grid")
-                .num_columns(2)
-                .show(ui, |ui| {
-                    ui.label("Molecules, N");
-                    ui.add(egui::DragValue::new(&mut self.n_bodies).range(2..=2000));
-                    ui.end_row();
-                    ui.label("Concentration (mM)");
-                    ui.add(
-                        egui::DragValue::new(&mut self.millimolar)
-                            .range(0.01..=200.0)
-                            .speed(0.1),
-                    );
-                    ui.end_row();
-                    let defaults = RunSpec::new(1, 1.0);
-                    ui.label("Detailed I(q)").on_hover_text(format!(
-                        "Also sum over beads for I(q), P(q) and S_eff: a frame every {} \
-                         sweeps instead of {}. S_com and, where it has a solution, the \
-                         charged-sphere S(q) are always shown",
-                        defaults.sweeps_per_frame, defaults.sweeps_per_check
-                    ));
-                    ui.checkbox(&mut self.detailed, "");
-                    ui.end_row();
-                    ui.label("q-vectors per bin").on_hover_text(
-                        "Lattice q-vectors per 2π/L bin for the bead sums: cost grows with \
-                         this; more gives smoother I(q) and S_eff",
-                    );
-                    ui.add_enabled(
-                        self.detailed,
-                        egui::DragValue::new(&mut self.vectors_per_bin).range(1..=500),
-                    );
-                    ui.end_row();
-                });
-            egui::CollapsingHeader::new("Monte Carlo")
+            fits = self.ui_solution(ui, archive);
+            self.ui_scattering(ui);
+            section(ui, "Monte Carlo");
+            egui::CollapsingHeader::new("Move settings")
                 .default_open(false)
-                .show(ui, |ui| self.ui_mc_inputs(ui));
+                .show(ui, |ui| self.ui_mc_inputs(ui))
+                .header_response
+                .on_hover_text("Copies and move steps; the defaults suit most runs");
         });
-        let can_start = self.ui_system_info(ui, archive);
+        self.ui_msa(ui, archive);
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
         if ui
-            .add_enabled(idle && can_start, egui::Button::new("Run"))
+            .add_enabled(idle && fits, egui::Button::new("Run"))
+            .on_hover_text("Equilibrate, then sample until stopped")
+            .on_disabled_hover_text("Needs a box larger than the table and no run in progress")
             .clicked()
         {
             self.start(archive);
         }
     }
 
-    /// Defaults suit most runs, hence collapsed.
-    fn ui_mc_inputs(&mut self, ui: &mut egui::Ui) {
-        egui::Grid::new("manybody_mc_grid")
-            .num_columns(2)
-            .show(ui, |ui| {
-                ui.label("Independent copies")
-                    .on_hover_text("Error bars come from the spread between copies");
-                ui.add(egui::DragValue::new(&mut self.copies).range(1..=16));
-                ui.end_row();
-                ui.label("Tune move steps").on_hover_text(
-                    "During equilibration, find the steps that move bodies furthest per \
-                         attempted move; frozen for production",
-                );
-                ui.checkbox(&mut self.tune_steps, "");
-                ui.end_row();
-                let start = if self.tune_steps { " (start)" } else { "" };
-                ui.label(format!("Translation step{start} (Å)"));
-                // Steps beyond L/2 add nothing (and are clamped).
-                let half_box = box_length(self.n_bodies, self.millimolar * 1e-3) / 2.0;
-                ui.add(
-                    egui::DragValue::new(&mut self.translation)
-                        .range(0.01..=half_box)
-                        .speed(0.1),
-                );
-                ui.end_row();
-                ui.label(format!("Rotation step{start} (rad)"));
-                ui.add(
-                    egui::DragValue::new(&mut self.rotation)
-                        .range(0.0..=std::f64::consts::PI)
-                        .speed(0.01),
-                );
-                ui.end_row();
-            });
-    }
-
-    /// Box, q range and screening for the chosen N and concentration; false
-    /// if the box is too small for the table.
-    fn ui_system_info(&self, ui: &mut egui::Ui, archive: &ScanArchive) -> bool {
-        let l = box_length(self.n_bodies, self.millimolar * 1e-3);
-        let needed = 2.0 * archive.table.rmax;
-        ui.separator();
-        ui.label(format!(
-            "Box L = {l:.0} Å, q_min = {:.4} Å⁻¹",
-            std::f64::consts::TAU / l
-        ));
-        ui.label(format!("Net charge = {:+.1} e", archive.net_charges().0));
+    /// N, concentration and what follows from them; false if the box is
+    /// too small for the table.
+    fn ui_solution(&mut self, ui: &mut egui::Ui, archive: &ScanArchive) -> bool {
+        section(ui, "Solution");
+        grid("manybody_solution").show(ui, |ui| {
+            ui.label("Molecules, N");
+            ui.add(egui::DragValue::new(&mut self.n_bodies).range(2..=2000))
+                .on_hover_text("Molecules in the periodic box; more lowers q_min");
+            ui.end_row();
+            ui.label("Concentration");
+            ui.add(
+                egui::DragValue::new(&mut self.millimolar)
+                    .range(0.01..=200.0)
+                    .speed(0.1)
+                    .suffix(" mM"),
+            )
+            .on_hover_text("Protein molarity; with N it sets the box size");
+            ui.end_row();
+        });
+        let l = self.box_length();
+        ui.label(format!("Box L = {l:.0} Å"))
+            .on_hover_text("Cubic box holding N molecules at this concentration");
         // Debye length for 1:1 salt in water at 25 °C.
         let debye = 3.04 / archive.settings.molarity.sqrt();
         ui.label(format!(
             "Salt {:.0} mM, Debye length ≈ {debye:.0} Å",
             archive.settings.molarity * 1e3
-        ));
+        ))
+        .on_hover_text("Set by the Twobody scan, whose table holds the screened energies");
+        let needed = 2.0 * archive.table.rmax;
         let fits = l >= needed;
         if !fits {
             ui.colored_label(
@@ -339,6 +288,104 @@ impl ManybodyTab {
             );
         }
         fits
+    }
+
+    fn ui_scattering(&mut self, ui: &mut egui::Ui) {
+        section(ui, "Scattering");
+        let defaults = RunSpec::new(1, 1.0);
+        grid("manybody_scattering").show(ui, |ui| {
+            ui.label("Detailed I(q)");
+            ui.checkbox(&mut self.detailed, "").on_hover_text(format!(
+                "Also sum over beads for I(q), P(q) and S_eff: a frame every {} sweeps \
+                 instead of {}. S_com and, where it has a solution, the MSA S(q) are \
+                 always shown",
+                defaults.sweeps_per_frame, defaults.sweeps_per_check
+            ));
+            ui.end_row();
+            ui.label("q-vectors per bin");
+            ui.add_enabled(
+                self.detailed,
+                egui::DragValue::new(&mut self.vectors_per_bin).range(1..=500),
+            )
+            .on_hover_text(
+                "Lattice q-vectors per 2π/L bin for the bead sums: cost grows with this; \
+                 more gives smoother I(q) and S_eff",
+            )
+            .on_disabled_hover_text("Only used with Detailed I(q)");
+            ui.end_row();
+        });
+        let l = self.box_length();
+        ui.label(format!("q_min = {:.4} Å⁻¹", std::f64::consts::TAU / l))
+            .on_hover_text("2π/L: the lowest q the periodic box can resolve");
+    }
+
+    /// Defaults suit most runs, hence collapsed.
+    fn ui_mc_inputs(&mut self, ui: &mut egui::Ui) {
+        grid("manybody_mc").show(ui, |ui| {
+            ui.label("Independent copies");
+            ui.add(egui::DragValue::new(&mut self.copies).range(1..=16))
+                .on_hover_text("Error bars come from the spread between copies");
+            ui.end_row();
+            ui.label("Tune move steps");
+            ui.checkbox(&mut self.tune_steps, "").on_hover_text(
+                "During equilibration, find the steps that move molecules furthest per \
+                 attempted move; frozen for production",
+            );
+            ui.end_row();
+            let start = if self.tune_steps { " (start)" } else { "" };
+            ui.label(format!("Translation step{start}"));
+            // Steps beyond L/2 add nothing (and are clamped).
+            let half_box = self.box_length() / 2.0;
+            ui.add(
+                egui::DragValue::new(&mut self.translation)
+                    .range(0.01..=half_box)
+                    .speed(0.1)
+                    .suffix(" Å"),
+            )
+            .on_hover_text("Largest displacement per axis, up to L/2");
+            ui.end_row();
+            ui.label(format!("Rotation step{start}"));
+            ui.add(
+                egui::DragValue::new(&mut self.rotation)
+                    .range(0.0..=std::f64::consts::PI)
+                    .speed(0.01)
+                    .suffix(" rad"),
+            )
+            .on_hover_text("Largest rotation angle, up to π");
+            ui.end_row();
+        });
+    }
+
+    /// The charged sphere for the inputs above, i.e. the next run's
+    /// dashed S(q); a running or paused run keeps its own.
+    fn ui_msa(&self, ui: &mut egui::Ui, archive: &ScanArchive) {
+        section(ui, "MSA reference");
+        let fluid = HsyFluid::for_scan(archive, self.millimolar * 1e-3);
+        ui.label(format!("Diameter σ = {:.1} Å", fluid.diameter))
+            .on_hover_text(format!(
+                "Sphere of the molecule's volume: molar mass × {PARTIAL_SPECIFIC_VOLUME} \
+                 cm³/g, a typical protein partial specific volume"
+            ));
+        ui.label(format!(
+            "Volume fraction φ = {:.4}",
+            fluid.volume_fraction()
+        ))
+        .on_hover_text("Number density × πσ³/6");
+        ui.label(format!("Charge Z = {:+.1} e", fluid.charge))
+            .on_hover_text("Net charge of the scanned molecule");
+        ui.label("Screening includes counterions").on_hover_text(
+            "Rescaled MSA (MPB-RMSA) as in Kaieda et al. 2014; unlike the MC table, \
+             κ counts the protein counterions as well as the salt",
+        );
+        let q_min = std::f64::consts::TAU / self.box_length();
+        if fluid.structure_factor(&[q_min]).is_none() {
+            ui.colored_label(egui::Color32::YELLOW, "No MSA solution: curve not shown")
+                .on_hover_text("Too dense or too strongly repulsive for the rescaling");
+        }
+    }
+
+    fn box_length(&self) -> f64 {
+        box_length(self.n_bodies, self.millimolar * 1e-3)
     }
 
     fn start(&mut self, archive: &ScanArchive) {
@@ -384,10 +431,19 @@ impl ManybodyTab {
         }
         ui.horizontal(|ui| {
             let pause = if self.running { "Pause" } else { "Resume" };
-            if ui.button(pause).clicked() {
+            let hint = if self.running {
+                "Hold the run; resume where it left off"
+            } else {
+                "Continue the held run"
+            };
+            if ui.button(pause).on_hover_text(hint).clicked() {
                 self.running = !self.running;
             }
-            if ui.button("Stop").clicked() {
+            if ui
+                .button("Stop")
+                .on_hover_text("End the run; its results stay for saving")
+                .clicked()
+            {
                 self.stop();
             }
         });
@@ -474,9 +530,13 @@ impl ManybodyTab {
                     for view in View::ALL.into_iter().filter(|v| v.offered(detailed)) {
                         ui.selectable_value(&mut self.view, view, view.label());
                     }
-                });
-            ui.checkbox(&mut axes.x, "log q");
-            ui.checkbox(&mut axes.y, "log y");
+                })
+                .response
+                .on_hover_text("S(q) for every run; I(q) and P(q) with Detailed I(q)");
+            ui.checkbox(&mut axes.x, "log q")
+                .on_hover_text("Logarithmic q axis");
+            ui.checkbox(&mut axes.y, "log y")
+                .on_hover_text("Logarithmic y axis; non-positive points are hidden");
         });
         let axes = self.log_axes[self.view as usize];
         let curve = run.curve();
@@ -576,8 +636,14 @@ impl ManybodyTab {
         }
         let (mut csv, mut trajectory) = (false, false);
         ui.horizontal(|ui| {
-            csv = ui.button("Curve (.csv)").clicked();
-            trajectory = ui.button("Trajectory (.traj)").clicked();
+            csv = ui
+                .button("Curve (.csv)")
+                .on_hover_text("Scattering curves and run statistics")
+                .clicked();
+            trajectory = ui
+                .button("Trajectory (.traj)")
+                .on_hover_text("Production frames: positions and orientations")
+                .clicked();
         });
         // After the row: saving reports errors through `&mut self`, which
         // the borrow of `run` above rules out inside it.
@@ -595,6 +661,19 @@ impl ManybodyTab {
             Ok(()) => {}
         }
     }
+}
+
+/// A Twobody-style heading: rule, bold title.
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.separator();
+    ui.add_space(2.0);
+    ui.strong(title);
+    ui.add_space(2.0);
+}
+
+fn grid(id: &str) -> egui::Grid {
+    egui::Grid::new(id).num_columns(2).spacing([8.0, 4.0])
 }
 
 /// egui_plot has no log axes, so log scales plot log₁₀ of the data;
@@ -711,12 +790,18 @@ fn marked_line(
     );
 }
 
-/// Vertical ±σ bars, one per q; a bar whose end has no logarithm is left out.
+/// Vertical ±σ bars, one per q. On log y, a bar reaching zero is cut one
+/// decade below its value: dropping it would make noisy points look certain.
 fn error_bars(q: &[f64], values: &[f64], errors: &[f64], axes: LogAxes) -> Vec<[[f64; 2]; 2]> {
     (0..q.len())
         .filter_map(|k| {
-            let end = |sign: f64| point(q[k], values[k] + sign * errors[k], axes);
-            Some([end(-1.0)?, end(1.0)?])
+            let (v, e) = (values[k], errors[k]);
+            let low = if axes.y && v - e <= 0.0 {
+                v / 10.0
+            } else {
+                v - e
+            };
+            Some([point(q[k], low, axes)?, point(q[k], v + e, axes)?])
         })
         .collect()
 }
@@ -789,6 +874,17 @@ mod tests {
         assert_eq!(offered(false), [View::StructureFactor]);
         assert_eq!(offered(true), View::ALL);
         assert_eq!(names(View::Intensity, true), ["I(q)"]);
+    }
+
+    /// S = 0.1 ± 0.15 must still show its bar on log y, cut one decade down.
+    #[test]
+    fn log_error_bars_reaching_below_zero_are_clipped_not_dropped() {
+        let axes = LogAxes { x: false, y: true };
+        let bars = error_bars(&[0.2], &[0.1], &[0.15], axes);
+        assert_eq!(bars.len(), 1);
+        let [[_, low], [_, high]] = bars[0];
+        assert!((low + 2.0).abs() < 1e-12, "{low}");
+        assert!((high - 0.25_f64.log10()).abs() < 1e-12, "{high}");
     }
 
     #[test]

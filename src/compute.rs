@@ -20,6 +20,7 @@ fn build_request(inputs: &ScanInputs, mol1_pdb: Vec<u8>, mol2_pdb: Vec<u8>) -> W
         mol1_pdb,
         mol2_pdb,
         settings,
+        subdivision: inputs.subdivision,
     }
 }
 
@@ -49,6 +50,7 @@ pub async fn run_scan_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use duello::Subdivision;
 
     /// The UI has no homo-dimer switch, so loading one PDB twice must still
     /// count as a homo-dimer, or Manybody refuses the scan.
@@ -56,7 +58,25 @@ mod tests {
     fn identical_structures_make_a_homo_dimer() {
         let inputs = ScanInputs::default();
         let pdb = b"ATOM ...".to_vec();
-        assert!(build_request(&inputs, pdb.clone(), pdb.clone()).settings.homo_dimer);
-        assert!(!build_request(&inputs, pdb, b"other".to_vec()).settings.homo_dimer);
+        assert!(
+            build_request(&inputs, pdb.clone(), pdb.clone())
+                .settings
+                .homo_dimer
+        );
+        assert!(
+            !build_request(&inputs, pdb, b"other".to_vec())
+                .settings
+                .homo_dimer
+        );
+    }
+
+    #[test]
+    fn request_carries_the_chosen_subdivision() {
+        let inputs = ScanInputs {
+            subdivision: Subdivision::Lattice,
+            ..Default::default()
+        };
+        let request = build_request(&inputs, vec![], vec![]);
+        assert_eq!(request.subdivision, Subdivision::Lattice);
     }
 }
