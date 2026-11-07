@@ -1,7 +1,7 @@
 //! Model and coarse-graining policy, set in Onebody: they decide titration, bead
 //! properties and the pair energy, so every tab must see the same choice.
 
-use crate::widgets::{grid, row, set_in_onebody};
+use crate::widgets::{grid, pick, row, set_in_onebody};
 use duello::web_api::ScanSettings;
 
 const MODEL_TIP: &str =
@@ -143,12 +143,18 @@ impl ForceField {
                     &mut self.model,
                     &Model::ALL,
                     Model::label,
+                    None,
                 )
             });
             row(ui, "CG policy", CG_TIP, |ui| {
-                pick(ui, "cg_combo", &mut self.cg, &CgPolicy::ALL, |cg| {
-                    cg.label()
-                })
+                pick(
+                    ui,
+                    "cg_combo",
+                    &mut self.cg,
+                    &CgPolicy::ALL,
+                    |cg| cg.label(),
+                    None,
+                )
             });
         });
     }
@@ -165,24 +171,6 @@ impl ForceField {
             });
         });
     }
-}
-
-/// Combo over `options`, shown by `label`.
-fn pick<T: Copy + PartialEq>(
-    ui: &mut egui::Ui,
-    id: &str,
-    value: &mut T,
-    options: &[T],
-    label: impl Fn(&T) -> &str,
-) -> egui::Response {
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(label(value))
-        .show_ui(ui, |ui| {
-            for option in options {
-                ui.selectable_value(value, *option, label(option));
-            }
-        })
-        .response
 }
 
 #[cfg(test)]

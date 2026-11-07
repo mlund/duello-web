@@ -2,16 +2,17 @@
 //! field and conditions, for the analysis windows. Titration steps a little each
 //! frame and starts over when anything it depends on changes.
 
+use super::panes::{self, Quantity};
 use super::scene::{self, Colouring};
-use super::table::{BeadTable, Column};
-use super::{panes, Pane};
+use super::table::BeadTable;
+use super::Pane;
 use crate::budget::{self, Instant};
 use crate::conditions::SolutionConditions;
 use crate::forcefield::ForceField;
 use crate::structures::StructureId;
 use crate::viewer::Viewer;
 use duello::archive::{CgBody, StructureFile};
-use duello::molecule::{titration_curve, CurvePoint, Molecule, MoleculeSpec, Step, Titrating};
+use duello::molecule::{Curve, Molecule, MoleculeSpec, Step, Titrating};
 use duello::system::TITRATION_SWEEPS;
 use std::hash::{Hash, Hasher};
 
@@ -21,10 +22,19 @@ const SEED: u64 = 1;
 /// MC sweeps in the first frame after a restart; `budget::retune` takes it from there.
 const FIRST_SWEEPS: u64 = 50;
 
-/// Titration curve abscissa: pH 2–12 in steps of 0.1.
-fn ph_grid() -> Vec<f64> {
-    (0..=100).map(|i| 2.0 + 0.1 * f64::from(i)).collect()
+/// pH 2–12 in `steps` intervals.
+fn ph_grid(steps: u32) -> Vec<f64> {
+    (0..=steps)
+        .map(|i| 2.0 + 10.0 * f64::from(i) / f64::from(steps))
+        .collect()
 }
+
+/// Henderson–Hasselbalch is cheap: every 0.1 pH.
+const IDEAL_STEPS: u32 = 100;
+
+/// MC costs a titration per point (~0.25 s natively for 2CDS): every 0.5 pH.
+/// Points use a scan's sweeps, so they agree with Multipole at their pH.
+const MC_CURVE_STEPS: u32 = 20;
 
 /// Everything the titration depends on. Contents rather than the id or name, so
 /// renaming, or reopening a session, doesn't start over.
@@ -57,37 +67,17 @@ pub struct MoleculeView {
     /// Counts molecules shown, naming them for the viewer and tables.
     generation: u64,
     error: Option<String>,
-    /// HH net charge over [`ph_grid`], for `curve_for`.
-    curve: Vec<CurvePoint>,
-    curve_for: Option<Key>,
+    /// MC and ideal curves for a [`Key::curve`]; MC fills in once the
+    /// current-pH titration is done.
+    curve: Option<(Key, Curve)>,
+    quantity: Quantity,
     sweeps_per_frame: u64,
     /// Contents hash of the last structure seen; an id's contents never change.
     hashed: Option<(StructureId, u64)>,
     viewer: Viewer,
     colouring: Colouring,
     atoms: BeadTable,
-    sites: BeadTable,
 }
-
-const ATOM_COLUMNS: &[Column] = &[
-    Column::Index,
-    Column::Chain,
-    Column::Residue,
-    Column::Kind,
-    Column::Charge,
-    Column::Mass,
-    Column::Sigma,
-    Column::Epsilon,
-    Column::Lambda,
-];
-
-const SITE_COLUMNS: &[Column] = &[
-    Column::Chain,
-    Column::Residue,
-    Column::Kind,
-    Column::Charge,
-    Column::Variance,
-];
 
 impl Default for MoleculeView {
     fn default() -> Self {
@@ -97,21 +87,20 @@ impl Default for MoleculeView {
             shown: None,
             generation: 0,
             error: None,
-            curve: Vec::new(),
-            curve_for: None,
+            curve: None,
+            quantity: Quantity::Charge,
             sweeps_per_frame: FIRST_SWEEPS,
             hashed: None,
             viewer: Viewer::default(),
             colouring: Colouring::Charge,
-            atoms: BeadTable::new("atoms_table", ATOM_COLUMNS, |_| true),
-            sites: BeadTable::new("sites_table", SITE_COLUMNS, |b| b.charge_variance.is_some()),
+            atoms: BeadTable::default(),
         }
     }
 }
 
 impl MoleculeView {
-    /// Call every frame Onebody shows; true while titrating, so the caller keeps
-    /// repainting.
+    /// Call every frame Onebody shows; true while titrating or filling the
+    /// curve, so the caller keeps repainting.
     pub fn tick(
         &mut self,
         structure: Option<(StructureId, &StructureFile)>,
@@ -121,6 +110,7 @@ impl MoleculeView {
         let Some((id, file)) = structure else {
             // Only the list emptying gets here; UI choices stay.
             (self.key, self.titrating, self.shown, self.error) = (None, None, None, None);
+            self.curve = None;
             return false;
         };
         let key = Key {
@@ -134,7 +124,11 @@ impl MoleculeView {
             self.restart(key, &file.contents);
         }
         self.advance();
-        self.titrating.is_some()
+        self.titrating.is_some() || self.curve_running()
+    }
+
+    fn curve_running(&self) -> bool {
+        self.curve.as_ref().is_some_and(|(_, c)| !c.is_done())
     }
 
     /// The titrated body; while conditions re-titrate, the last one.
@@ -151,9 +145,11 @@ impl MoleculeView {
         match pane {
             Pane::Multipole => panes::multipole(ui, molecule),
             Pane::Titration => {
-                let height = 0.5 * ui.available_height();
-                panes::titration_plot(ui, &self.curve, key.ph, height);
-                self.sites.ui(ui, &molecule.beads, generation);
+                let (ideal, mc) = self
+                    .curve
+                    .as_ref()
+                    .map_or((&[][..], &[][..]), |(_, c)| (c.ideal(), c.points()));
+                panes::titration(ui, &mut self.quantity, ideal, mc, key.ph);
             }
             Pane::Viewer => {
                 colouring_picker(ui, &mut self.colouring);
@@ -185,6 +181,17 @@ impl MoleculeView {
             });
         } else if self.shown.is_none() {
             ui.weak("Load a structure to analyse it.");
+        }
+        if let Some((_, curve)) = self.curve.as_ref().filter(|(_, c)| !c.is_done()) {
+            ui.add(
+                egui::ProgressBar::new(curve.progress() as f32)
+                    .show_percentage()
+                    .text("Titration curve…"),
+            )
+            .on_hover_text(format!(
+                "Monte Carlo titration every {} pH, as many sweeps as a scan",
+                10.0 / f64::from(MC_CURVE_STEPS)
+            ));
         }
     }
 
@@ -220,35 +227,44 @@ impl MoleculeView {
             .and_then(|()| Titrating::start(pdb, spec, SEED));
         (self.titrating, self.error) = match started {
             Ok(titrating) => (Some(titrating), None),
-            Err(e) => (None, Some(format!("{e:#}"))),
+            Err(e) => {
+                // A molecule that can't titrate gets no curve either.
+                self.curve = None;
+                (None, Some(format!("{e:#}")))
+            }
         };
     }
 
     fn update_curve(&mut self, key: Key, pdb: &[u8], spec: &MoleculeSpec) -> anyhow::Result<()> {
-        if self.curve_for != Some(key.curve()) {
-            self.curve_for = None;
-            self.curve = titration_curve(pdb, spec, &ph_grid())?;
-            self.curve_for = Some(key.curve());
+        if self.curve.as_ref().is_some_and(|(k, _)| *k == key.curve()) {
+            return Ok(());
         }
+        self.curve = None;
+        let (mc, ideal) = (ph_grid(MC_CURVE_STEPS), ph_grid(IDEAL_STEPS));
+        self.curve = Some((key.curve(), Curve::start(pdb, spec, &mc, &ideal, SEED)?));
         Ok(())
     }
 
-    /// One frame's sweeps.
+    /// One frame's sweeps: the current pH first, then the curve. Both titrate the
+    /// same molecule, so they share one budget.
     fn advance(&mut self) {
-        let Some(titrating) = self.titrating.take() else {
-            return;
-        };
+        let sweeps = self.sweeps_per_frame as usize;
         let start = Instant::now();
-        let step = titrating.advance(self.sweeps_per_frame as usize);
-        self.sweeps_per_frame = budget::retune(self.sweeps_per_frame, start);
-        match step {
-            Ok(Step::Running(titrating)) => self.titrating = Some(titrating),
-            Ok(Step::Done(molecule)) => {
-                self.shown = Some(molecule);
-                self.generation += 1;
+        if let Some(titrating) = self.titrating.take() {
+            match titrating.advance(sweeps) {
+                Ok(Step::Running(titrating)) => self.titrating = Some(titrating),
+                Ok(Step::Done(molecule)) => {
+                    self.shown = Some(molecule);
+                    self.generation += 1;
+                }
+                Err(e) => self.error = Some(format!("{e:#}")),
             }
-            Err(e) => self.error = Some(format!("{e:#}")),
+        } else if let Some((_, curve)) = self.curve.as_mut().filter(|(_, c)| !c.is_done()) {
+            curve.advance(sweeps);
+        } else {
+            return;
         }
+        self.sweeps_per_frame = budget::retune(self.sweeps_per_frame, start);
     }
 }
 

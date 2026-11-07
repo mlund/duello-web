@@ -1,8 +1,8 @@
-//! What the Multipole and Titration windows draw from a titrated molecule.
+//! What the Multipole and Titration windows draw.
 
 use crate::widgets::{grid, row};
 use duello::molecule::{CurvePoint, Molecule};
-use egui_plot::{Line, Plot, PlotPoints, VLine};
+use egui_plot::{Line, Plot, PlotPoints, Points, VLine};
 
 /// 1 e·Å in debye.
 const DEBYE_PER_E_ANGSTROM: f64 = 4.803_204;
@@ -70,29 +70,107 @@ pub fn multipole(ui: &mut egui::Ui, molecule: &Molecule) {
     });
 }
 
-/// Z(pH) and capacitance(pH), marking `ph`; the curve uses Henderson–Hasselbalch
-/// as MC is too slow for a whole curve.
-pub fn titration_plot(ui: &mut egui::Ui, curve: &[CurvePoint], ph: f64, height: f32) {
-    let series = |f: fn(&CurvePoint) -> f64| {
-        PlotPoints::from(curve.iter().map(|p| [p.ph, f(p)]).collect::<Vec<_>>())
-    };
+/// What the titration plot shows over pH.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quantity {
+    Charge,
+    Dipole,
+    Quadrupole,
+    Capacitance,
+}
+
+impl Quantity {
+    const ALL: [Quantity; 4] = [
+        Quantity::Charge,
+        Quantity::Dipole,
+        Quantity::Quadrupole,
+        Quantity::Capacitance,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Quantity::Charge => "⟨Z⟩",
+            Quantity::Dipole => "√⟨μ²⟩",
+            Quantity::Quadrupole => "√⟨Q²⟩",
+            Quantity::Capacitance => "Capacitance",
+        }
+    }
+
+    fn axis(self) -> &'static str {
+        match self {
+            Quantity::Charge => "⟨Z⟩ (e)",
+            Quantity::Dipole => "√⟨μ²⟩ (e·Å)",
+            Quantity::Quadrupole => "√⟨Q²⟩ (e·Å²)",
+            Quantity::Capacitance => "⟨Z²⟩ − ⟨Z⟩² (e²)",
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Quantity::Charge => "Mean net charge",
+            Quantity::Dipole => {
+                "Root-mean-square dipole moment about the mass centre; unlike ⟨μ⟩, \
+                 exact for Henderson–Hasselbalch too, so the curves compare"
+            }
+            Quantity::Quadrupole => {
+                "Root-mean-square quadrupole norm about the mass centre; unlike ⟨Q⟩, \
+                 exact for Henderson–Hasselbalch too, so the curves compare"
+            }
+            Quantity::Capacitance => {
+                "Charge fluctuation: how readily the charge responds to a nearby charge"
+            }
+        }
+    }
+
+    fn of(self, p: &CurvePoint) -> f64 {
+        match self {
+            Quantity::Charge => p.charge,
+            Quantity::Dipole => p.dipole,
+            Quantity::Quadrupole => p.quadrupole,
+            Quantity::Capacitance => p.capacitance,
+        }
+    }
+}
+
+/// `quantity` over pH from Monte Carlo (`mc`, filling in) and ideal
+/// Henderson–Hasselbalch (`ideal`), marking the current `ph`.
+pub fn titration(
+    ui: &mut egui::Ui,
+    quantity: &mut Quantity,
+    ideal: &[CurvePoint],
+    mc: &[CurvePoint],
+    ph: f64,
+) {
+    crate::widgets::pick(
+        ui,
+        "titration_quantity",
+        quantity,
+        &Quantity::ALL,
+        |q| q.label(),
+        Some(Quantity::tooltip),
+    )
+    .on_hover_text("What to plot over pH");
+    let q = *quantity;
+    let series =
+        |curve: &[CurvePoint]| -> Vec<[f64; 2]> { curve.iter().map(|p| [p.ph, q.of(p)]).collect() };
+    let (mc, ideal) = (series(mc), series(ideal));
     let marker = ui.visuals().weak_text_color();
     Plot::new("titration_curve")
-        .height(height)
         .legend(crate::widgets::curve_legend())
         .x_axis_label("pH")
-        .y_axis_label("Z (e), capacitance (e²)")
+        .y_axis_label(q.axis())
         .show(ui, |plot| {
-            plot.line(Line::new("Z", series(|p| p.charge)));
+            plot.line(Line::new("Monte Carlo", PlotPoints::from(mc.clone())));
+            plot.points(Points::new("Monte Carlo", PlotPoints::from(mc)).radius(2.5));
             plot.line(
-                Line::new("capacitance", series(|p| p.capacitance))
+                Line::new("ideal (HH)", PlotPoints::from(ideal))
                     .style(egui_plot::LineStyle::dashed_dense()),
             );
             plot.vline(VLine::new("current pH", ph).color(marker));
         })
         .response
         .on_hover_text(
-            "Net charge and its fluctuation from Henderson–Hasselbalch. The site table \
-             and Multipole come from Monte Carlo, which adds site–site coupling.",
+            "Monte Carlo includes site–site coupling; ideal Henderson–Hasselbalch \
+             titrates each site alone. Monte Carlo points fill in as they finish.",
         );
 }

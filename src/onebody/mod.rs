@@ -96,18 +96,18 @@ impl OnebodyTab {
 /// The analysis windows, in tiling order.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Pane {
-    Multipole,
     Titration,
+    Multipole,
     Viewer,
     Atoms,
 }
 
 impl Pane {
-    const ALL: [Pane; 4] = [Pane::Multipole, Pane::Titration, Pane::Viewer, Pane::Atoms];
+    const ALL: [Pane; 4] = [Pane::Titration, Pane::Multipole, Pane::Viewer, Pane::Atoms];
 }
 
 impl windows::Pane for Pane {
-    const GRID: [usize; 2] = [2, 3];
+    const GRID: [usize; 2] = [2, 2];
 
     fn title(self) -> &'static str {
         match self {
@@ -121,19 +121,21 @@ impl windows::Pane for Pane {
     fn tooltip(self) -> &'static str {
         match self {
             Pane::Multipole => "Charge, dipole and quadrupole moments and their fluctuations",
-            Pane::Titration => "Net charge over pH, and each titratable site at the current pH",
+            Pane::Titration => {
+                "Charge, dipole, quadrupole or capacitance over pH: Monte Carlo and ideal"
+            }
             Pane::Viewer => "3D view of the coarse-grained beads",
             Pane::Atoms => "Every bead with its charge and force-field parameters",
         }
     }
 
-    /// Moments and titration side by side, then the viewer and table full width.
+    /// Titration and moments above, viewer and bead table below.
     fn slot(self) -> Slot {
         let (col, row, span) = match self {
-            Pane::Multipole => (0, 0, 1),
-            Pane::Titration => (1, 0, 1),
-            Pane::Viewer => (0, 1, 2),
-            Pane::Atoms => (0, 2, 2),
+            Pane::Titration => (0, 0, 1),
+            Pane::Multipole => (1, 0, 1),
+            Pane::Viewer => (0, 1, 1),
+            Pane::Atoms => (1, 1, 1),
         };
         Slot { col, row, span }
     }

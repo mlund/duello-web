@@ -18,6 +18,28 @@ pub fn row(
     ui.end_row();
 }
 
+/// Combo over `options`, shown by `label`, each with `tip` if given.
+pub fn pick<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut T,
+    options: &[T],
+    label: impl Fn(&T) -> &str,
+    tip: Option<fn(T) -> &'static str>,
+) -> egui::Response {
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label(value))
+        .show_ui(ui, |ui| {
+            for option in options {
+                let item = ui.selectable_value(value, *option, label(option));
+                if let Some(tip) = tip {
+                    item.on_hover_text(tip(*option));
+                }
+            }
+        })
+        .response
+}
+
 /// Tooltip for a value shown read-only outside Onebody, which owns it.
 pub fn set_in_onebody(tip: &str) -> String {
     format!("{tip}\n\nSet in Onebody.")

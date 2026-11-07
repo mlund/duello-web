@@ -1,4 +1,4 @@
-//! Bead tables: sortable, resizable, striped.
+//! The bead table: sortable, resizable, striped.
 
 use duello::molecule::BeadRow;
 use std::cmp::Ordering;
@@ -30,37 +30,47 @@ pub fn sort_rows(beads: &[BeadRow], rows: &mut [usize], column: Column, ascendin
     });
 }
 
+const COLUMNS: &[Column] = &[
+    Column::Index,
+    Column::Chain,
+    Column::Residue,
+    Column::Kind,
+    Column::Charge,
+    Column::Variance,
+    Column::Mass,
+    Column::Sigma,
+    Column::Epsilon,
+    Column::Lambda,
+];
+
 /// Sort state and row order of one table; rows are re-sorted only when the
 /// molecule or the sort changes.
 pub struct BeadTable {
     id: &'static str,
     columns: &'static [Column],
-    /// Which beads it lists.
-    keep: fn(&BeadRow) -> bool,
     sort: (Column, bool),
     order: Vec<usize>,
     /// Molecule `order` was built for.
     sorted_for: Option<u64>,
 }
 
-impl BeadTable {
-    pub fn new(id: &'static str, columns: &'static [Column], keep: fn(&BeadRow) -> bool) -> Self {
+impl Default for BeadTable {
+    fn default() -> Self {
         Self {
-            id,
-            columns,
-            keep,
+            id: "atoms_table",
+            columns: COLUMNS,
             sort: (Column::Index, true),
             order: Vec::new(),
             sorted_for: None,
         }
     }
+}
 
+impl BeadTable {
     /// `molecule` identifies `beads`, so a new titration re-sorts.
     pub fn ui(&mut self, ui: &mut egui::Ui, beads: &[BeadRow], molecule: u64) {
         if self.sorted_for != Some(molecule) {
-            self.order = (0..beads.len())
-                .filter(|&i| (self.keep)(&beads[i]))
-                .collect();
+            self.order = (0..beads.len()).collect();
             self.sorted_for = Some(molecule);
             self.resort(beads);
         }
