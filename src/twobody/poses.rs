@@ -1,7 +1,7 @@
 //! The Poses window: the scan's lowest-energy states, drawn as beads.
 
 use crate::compute::ComputeStatus;
-use crate::viewer::{charge_color, Scene, Sphere, Viewer};
+use crate::viewer::{charge_color, Rgba, Scene, Sphere, Viewer};
 use crate::widgets::placeholder;
 use duello::archive::{CgBody, ScanArchive};
 use duello::poses::{lowest, TablePose};
@@ -67,8 +67,11 @@ fn picker(ui: &mut egui::Ui, poses: &[TablePose], picked: &mut usize) {
             })
             .response
             .on_hover_text(tip);
-        ui.weak("beads: red −, blue +")
-            .on_hover_text("Bead charge; full colour at ±1 e");
+        ui.weak("beads: red −, blue +; neutral sand (1), slate (2)")
+            .on_hover_text(
+                "Bead charge, full colour at ±1 e. Near-neutral beads are tinted by \
+                 molecule: sand for molecule 1, slate for molecule 2.",
+            );
     });
 }
 
@@ -82,15 +85,27 @@ fn label(k: usize, pose: &TablePose) -> String {
     )
 }
 
+/// Each molecule's neutral bead colour, warm and cool around the charge map's
+/// grey, so the two bodies tell apart while red and blue still read as charge.
+const NEUTRAL_TINTS: [Rgba; 2] = [[0.84, 0.78, 0.66, 1.0], [0.66, 0.74, 0.86, 1.0]];
+
+/// The charge map with `neutral` in place of its grey; fades out as |z| → 1, so
+/// a full charge looks the same in either molecule.
+fn tinted_charge_color(z: f64, neutral: Rgba) -> Rgba {
+    let end = charge_color(z.signum());
+    let t = z.abs().min(1.0) as f32;
+    std::array::from_fn(|i| (1.0 - t) * neutral[i] + t * end[i])
+}
+
 /// Both bodies as beads coloured by charge, framed about their joint centre.
 fn scene(pose: &TablePose, bodies: &[CgBody; 2]) -> Scene {
     let placed = pose.place(bodies);
-    let spheres: Vec<Sphere> = (placed.iter().zip(bodies))
-        .flat_map(|(beads, body)| {
-            (beads.iter().zip(&body.radii).zip(&body.charges)).map(|((p, &r), &z)| Sphere {
+    let spheres: Vec<Sphere> = (placed.iter().zip(bodies).zip(NEUTRAL_TINTS))
+        .flat_map(|((beads, body), neutral)| {
+            (beads.iter().zip(&body.radii).zip(&body.charges)).map(move |((p, &r), &z)| Sphere {
                 center: p.map(|x| x as f32),
                 radius: r as f32,
-                color: charge_color(z),
+                color: tinted_charge_color(z, neutral),
             })
         })
         .collect();
@@ -122,6 +137,17 @@ pub fn poses_shown(status: &ComputeStatus, result: Option<&ScanArchive>) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn neutral_beads_take_their_molecules_tint_and_full_charges_do_not() {
+        let [a, b] = NEUTRAL_TINTS;
+        assert_eq!(tinted_charge_color(0.0, a), a);
+        assert_eq!(tinted_charge_color(0.0, b), b);
+        for z in [-1.0, 1.0, 2.0] {
+            assert_eq!(tinted_charge_color(z, a), charge_color(z));
+            assert_eq!(tinted_charge_color(z, b), charge_color(z));
+        }
+    }
 
     #[test]
     fn poses_show_only_for_a_finished_scan() {
