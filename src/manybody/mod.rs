@@ -8,6 +8,7 @@ mod scene;
 mod stats;
 mod windows;
 
+use crate::widgets::grid;
 use duello::archive::{CgBody, ScanArchive};
 use duello::nbody::{
     box_length, Device, HsyFluid, MsaOverrides, NBodyRun, Progress, RunSpec, Scattering, Stage,
@@ -790,10 +791,6 @@ fn copy_picker(ui: &mut egui::Ui, copy: &mut usize, copies: usize) {
 /// What a pane shows until it has data.
 fn placeholder(ui: &mut egui::Ui, text: &str) {
     ui.centered_and_justified(|ui| ui.weak(text));
-}
-
-fn grid(id: &str) -> egui::Grid {
-    egui::Grid::new(id).num_columns(2).spacing([8.0, 4.0])
 }
 
 /// Runs `future` without blocking the browser's event loop, which GPU

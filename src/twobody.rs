@@ -1,9 +1,12 @@
 use crate::compute::{ComputeResult, ComputeStatus};
+use crate::conditions::SolutionConditions;
 #[cfg(target_arch = "wasm32")]
 use crate::files::download_bytes_as_file;
 use crate::files::save_file;
 use crate::inputs::{CgPolicy, Model, ScanInputs};
-use duello::web_api::{PmfPoint, ScanProgress};
+use crate::structures::{StructureId, Structures};
+use duello::archive::StructureFile;
+use duello::web_api::{PmfPoint, ScanProgress, ScanSettings};
 use duello::Subdivision;
 use egui_plot::{Line, MarkerShape, Plot, PlotPoint, Points};
 use std::ops::ControlFlow;
@@ -20,13 +23,6 @@ fn subdivision_label(scheme: Subdivision) -> &'static str {
         Subdivision::Geodesic => "Geodesic",
         Subdivision::Lattice => "Lattice",
     }
-}
-
-/// Action requested by mol_input_ui.
-enum MolAction {
-    None,
-    PickFile,
-    FetchPdb,
 }
 
 /// Plot data in egui_plot's own type, so frames borrow it instead of converting.
@@ -55,21 +51,14 @@ impl PlotCache {
     }
 }
 
-/// Per-molecule upload state.
-struct MolUpload {
-    name: String,
-    data: Vec<u8>,
-}
-
-/// Two-body scan: inputs, the scan's lifecycle, PDB fetch, import/export
-/// and the PMF plot. The app only needs its archive, for Manybody.
+/// Two-body scan of a pair picked from Onebody's structures: inputs, the
+/// scan's lifecycle, import/export and the PMF plot.
 pub struct TwobodyTab {
     inputs: ScanInputs,
-    mol1: Option<MolUpload>,
-    mol2: Option<MolUpload>,
-    /// PDB ID text fields for fetching from RCSB
-    pdb_id1: String,
-    pdb_id2: String,
+    /// Molecules 1 and 2; the same entry twice is a homo-dimer.
+    selected: [Option<StructureId>; 2],
+    /// Settings of a scan just imported, until the app hands them on.
+    imported: Option<ScanSettings>,
     status: ComputeStatus,
     result: Option<ComputeResult>,
     /// Cached plot data (computed once from result, reused each frame).
@@ -84,8 +73,6 @@ pub struct TwobodyTab {
     progress_rx: Option<mpsc::Receiver<ScanProgress>>,
     /// Flag to signal cancellation to the running scan.
     cancel_flag: Arc<AtomicBool>,
-    /// Channel for receiving file uploads (mol_num, name, data).
-    file_rx: Option<mpsc::Receiver<(u8, String, Vec<u8>)>>,
     /// Bytes of a scan archive picked for import.
     import_rx: Option<mpsc::Receiver<Vec<u8>>>,
 }
@@ -103,10 +90,8 @@ impl TwobodyTab {
         }
         Self {
             inputs: ScanInputs::default(),
-            mol1: None,
-            mol2: None,
-            pdb_id1: "2CDS".to_string(),
-            pdb_id2: "2CDS".to_string(),
+            selected: [None; 2],
+            imported: None,
             status: ComputeStatus::Idle,
             result: None,
             plot_cache: None,
@@ -116,7 +101,6 @@ impl TwobodyTab {
             result_rx: None,
             progress_rx: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
-            file_rx: None,
             import_rx: None,
         }
     }
@@ -131,18 +115,29 @@ impl TwobodyTab {
     pub fn poll(&mut self, ctx: &egui::Context) {
         self.poll_result();
         self.poll_progress();
-        self.poll_file_upload();
         self.poll_import();
         if matches!(self.status, ComputeStatus::Running { .. }) {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui) {
+    /// The solution a scan just imported was made in, once; the app gives
+    /// it to the conditions so every tab describes that scan.
+    pub fn take_import(&mut self) -> Option<ScanSettings> {
+        self.imported.take()
+    }
+
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        structures: &Structures,
+        conditions: &SolutionConditions,
+    ) {
         let is_dark = ui.visuals().dark_mode;
+        self.keep_selection_valid(structures);
         egui::Panel::left("inputs").min_size(220.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                self.ui_left_panel(ui);
+                self.ui_left_panel(ui, structures, conditions);
             });
         });
 
@@ -157,7 +152,23 @@ impl TwobodyTab {
         });
     }
 
-    fn ui_left_panel(&mut self, ui: &mut egui::Ui) {
+    /// Clears picks whose structure was removed. With neither left, both
+    /// take the first structure, so one load is enough for a homo-dimer;
+    /// otherwise the user re-picks, so a hetero pair never turns homo.
+    fn keep_selection_valid(&mut self, structures: &Structures) {
+        let valid = |id: Option<StructureId>| id.filter(|&id| structures.get(id).is_some());
+        self.selected = match self.selected.map(valid) {
+            [None, None] => [structures.first(); 2],
+            kept => kept,
+        };
+    }
+
+    fn ui_left_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        structures: &Structures,
+        conditions: &SolutionConditions,
+    ) {
         // The browser shows this in the HTML header instead.
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -170,21 +181,7 @@ impl TwobodyTab {
         // --- Molecules ---
         ui.strong("Molecules");
         ui.add_space(2.0);
-
-        ui.label("Molecule 1:");
-        match Self::mol_input_ui(ui, &self.mol1, &mut self.pdb_id1) {
-            MolAction::PickFile => self.pick_file(1),
-            MolAction::FetchPdb => self.fetch_pdb(1),
-            MolAction::None => {}
-        }
-
-        ui.add_space(2.0);
-        ui.label("Molecule 2:");
-        match Self::mol_input_ui(ui, &self.mol2, &mut self.pdb_id2) {
-            MolAction::PickFile => self.pick_file(2),
-            MolAction::FetchPdb => self.fetch_pdb(2),
-            MolAction::None => {}
-        }
+        self.ui_molecules(ui, structures);
 
         ui.add_space(6.0);
         ui.separator();
@@ -233,49 +230,19 @@ impl TwobodyTab {
         ui.strong("Solution");
         ui.add_space(2.0);
 
-        egui::Grid::new("solution_grid")
-            .num_columns(2)
-            .spacing([8.0, 4.0])
-            .show(ui, |ui| {
-                ui.label("pH");
-                ui.add(
-                    egui::DragValue::new(&mut self.inputs.ph)
-                        .speed(0.1)
-                        .range(0.0..=14.0),
-                )
-                .on_hover_text(
-                    "Determines the average ionization state of titratable groups \
-                    and N/C terminal ends using Metropolis GCMC swap moves.",
-                );
-                ui.end_row();
-
-                ui.label("Ionic strength");
-                ui.add(
-                    egui::DragValue::new(&mut self.inputs.molarity)
-                        .speed(0.01)
-                        .suffix(" M")
-                        .range(0.0..=10.0),
-                )
-                .on_hover_text(
-                    "Sets the Debye screening length used in both the Monte Carlo \
-                    titration of ionizable groups and in the intermolecular \
-                    protein-protein interaction energy via the Yukawa potential.",
-                );
-                ui.end_row();
-
-                ui.label("Temperature");
-                ui.add(
-                    egui::DragValue::new(&mut self.inputs.temperature)
-                        .speed(1.0)
-                        .suffix(" K")
-                        .range(1.0..=1000.0),
-                )
-                .on_hover_text(
-                    "Affects the thermal energy used in Boltzmann averaging \
-                    and the dielectric constant of water.",
-                );
-                ui.end_row();
-            });
+        conditions.summary_ui(ui);
+        if let Some(result) = &self.result {
+            if !conditions.matches(&result.settings) {
+                ui.colored_label(egui::Color32::YELLOW, "Differs from the shown scan")
+                    .on_hover_text(format!(
+                        "The plotted scan was made at pH {:.2}, {:.3} M, {:.2} K; \
+                        run a new scan to use the conditions above",
+                        result.settings.ph,
+                        result.settings.ionic_strength,
+                        result.settings.temperature
+                    ));
+            }
+        }
 
         ui.add_space(6.0);
         ui.separator();
@@ -391,8 +358,7 @@ impl TwobodyTab {
             ui.colored_label(egui::Color32::LIGHT_RED, *err);
         }
 
-        let can_run = self.mol1.is_some()
-            && (self.inputs.homo_dimer || self.mol2.is_some())
+        let can_run = self.pair(structures).is_some()
             && matches!(self.status, ComputeStatus::Idle)
             && validation_errors.is_empty()
             && self.gpu_available;
@@ -402,12 +368,12 @@ impl TwobodyTab {
                 .add_enabled(can_run, egui::Button::new("Run scan"))
                 .on_hover_text("Tabulate the pair energy over separations and orientations")
                 .on_disabled_hover_text(
-                    "Needs both molecules (or one for a homo-dimer), valid inputs, a GPU \
-                    and no scan running",
+                    "Needs both molecules picked from Onebody's structures, valid inputs, \
+                    a GPU and no scan running",
                 )
                 .clicked()
             {
-                self.start_scan();
+                self.start_scan(structures, conditions);
             }
             if matches!(self.status, ComputeStatus::Running { .. })
                 && ui
@@ -463,7 +429,7 @@ impl TwobodyTab {
     fn ui_center_panel(&mut self, ui: &mut egui::Ui, is_dark: bool) {
         let Some(cache) = &self.plot_cache else {
             ui.centered_and_justified(|ui| {
-                ui.label("Upload PDB files and run a scan to see the PMF plot.");
+                ui.label("Load structures in Onebody and run a scan to see the PMF plot.");
             });
             return;
         };
@@ -606,146 +572,36 @@ impl TwobodyTab {
         }
     }
 
-    /// UI for a single molecule input: upload button + PDB ID text field.
-    /// Returns an action to perform after the UI is drawn (avoids borrow issues).
-    fn mol_input_ui(ui: &mut egui::Ui, mol: &Option<MolUpload>, pdb_id: &mut String) -> MolAction {
-        if let Some(m) = mol {
-            ui.label(format!("Loaded: {}", m.name));
-        }
-
-        let mut action = MolAction::None;
-        ui.horizontal(|ui| {
-            if ui
-                .button("Upload file...")
-                .on_hover_text("Load a PDB file from disk")
-                .clicked()
-            {
-                action = MolAction::PickFile;
-            }
-            ui.label("or");
-            ui.add(
-                egui::TextEdit::singleline(pdb_id)
-                    .hint_text("PDB ID")
-                    .desired_width(50.0),
-            )
-            .on_hover_text("Four-character RCSB PDB code, e.g. 4LZT");
-            let id_valid = pdb_id.len() == 4 && pdb_id.chars().all(|c| c.is_alphanumeric());
-            if ui
-                .add_enabled(id_valid, egui::Button::new("Fetch"))
-                .on_hover_text("Download this structure from RCSB")
-                .on_disabled_hover_text("Enter a four-character PDB ID")
-                .clicked()
-            {
-                action = MolAction::FetchPdb;
-            }
-        });
-        action
+    /// Both picked structures, if both are loaded.
+    fn pair<'a>(&self, structures: &'a Structures) -> Option<[&'a StructureFile; 2]> {
+        let [a, b] = self.selected;
+        Some([structures.get(a?)?, structures.get(b?)?])
     }
 
-    /// Fetch a PDB file from RCSB by ID.
-    fn fetch_pdb(&mut self, mol_num: u8) {
-        let pdb_id = if mol_num == 1 {
-            self.pdb_id1.trim().to_uppercase()
-        } else {
-            self.pdb_id2.trim().to_uppercase()
-        };
-        if pdb_id.len() != 4 {
+    fn ui_molecules(&mut self, ui: &mut egui::Ui, structures: &Structures) {
+        if structures.first().is_none() {
+            ui.weak("Load structures in Onebody")
+                .on_hover_text("Onebody holds the structures every tab works on");
             return;
         }
-        let (tx, rx) = mpsc::channel();
-        self.file_rx = Some(rx);
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            wasm_bindgen_futures::spawn_local(async move {
-                let url = format!("https://files.rcsb.org/download/{pdb_id}.pdb");
-                match fetch_url(&url).await {
-                    Ok(data) => {
-                        let _ = tx.send((mol_num, format!("{pdb_id}.pdb"), data));
-                    }
-                    Err(e) => {
-                        log::error!("Failed to fetch PDB {pdb_id}: {e}");
-                    }
+        egui::Grid::new("molecules_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                for (n, slot) in self.selected.iter_mut().enumerate() {
+                    let label = format!("Molecule {}", n + 1);
+                    ui.label(&label);
+                    molecule_picker(ui, &label, slot, structures);
+                    ui.end_row();
                 }
             });
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            std::thread::spawn(move || {
-                let url = format!("https://files.rcsb.org/download/{pdb_id}.pdb");
-                match ureq::get(&url).call() {
-                    Ok(response) => {
-                        let mut data = Vec::new();
-                        if std::io::Read::read_to_end(
-                            &mut response.into_body().as_reader(),
-                            &mut data,
-                        )
-                        .is_ok()
-                        {
-                            let _ = tx.send((mol_num, format!("{pdb_id}.pdb"), data));
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Failed to fetch PDB {pdb_id}: {e}");
-                    }
-                }
-            });
-        }
     }
 
-    fn pick_file(&mut self, mol_num: u8) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("PDB files", &["pdb"])
-                .pick_file()
-            {
-                if let Ok(data) = std::fs::read(&path) {
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let upload = MolUpload { name, data };
-                    if mol_num == 1 {
-                        self.mol1 = Some(upload);
-                    } else {
-                        self.mol2 = Some(upload);
-                    }
-                }
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let (tx, rx) = mpsc::channel();
-            self.file_rx = Some(rx);
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Some(file) = rfd::AsyncFileDialog::new()
-                    .add_filter("PDB files", &["pdb"])
-                    .pick_file()
-                    .await
-                {
-                    let name = file.file_name();
-                    let data = file.read().await;
-                    let _ = tx.send((mol_num, name, data));
-                }
-            });
-        }
-    }
-
-    fn start_scan(&mut self) {
-        let mol1_data = match &self.mol1 {
-            Some(m) => m.data.clone(),
-            None => return,
+    fn start_scan(&mut self, structures: &Structures, conditions: &SolutionConditions) {
+        let Some([mol1, mol2]) = self.pair(structures) else {
+            return;
         };
-        let mol2_data = if self.inputs.homo_dimer {
-            mol1_data.clone()
-        } else {
-            match &self.mol2 {
-                Some(m) => m.data.clone(),
-                None => return,
-            }
-        };
+        let (mol1_data, mol2_data) = (mol1.contents.clone(), mol2.contents.clone());
 
         self.error = None;
         self.result = None;
@@ -774,13 +630,13 @@ impl TwobodyTab {
             }
         };
 
-        let inputs = self.inputs.clone();
+        let settings = self.inputs.settings(conditions);
 
         #[cfg(not(target_arch = "wasm32"))]
         {
             std::thread::spawn(move || {
                 let result =
-                    crate::compute::run_scan_blocking(&inputs, mol1_data, mol2_data, progress);
+                    crate::compute::run_scan_blocking(settings, mol1_data, mol2_data, progress);
                 let _ = tx.send(result);
             });
         }
@@ -789,7 +645,7 @@ impl TwobodyTab {
         {
             wasm_bindgen_futures::spawn_local(async move {
                 let result =
-                    crate::compute::run_scan_async(inputs, mol1_data, mol2_data, progress).await;
+                    crate::compute::run_scan_async(settings, mol1_data, mol2_data, progress).await;
                 let _ = tx.send(result);
             });
         }
@@ -807,21 +663,6 @@ impl TwobodyTab {
             };
             if let (Some(point), Some(cache)) = (p.point, &mut self.plot_cache) {
                 cache.push(point);
-            }
-        }
-    }
-
-    /// Poll for async file uploads. Called each frame.
-    fn poll_file_upload(&mut self) {
-        if let Some(rx) = &self.file_rx {
-            if let Ok((mol_num, name, data)) = rx.try_recv() {
-                let upload = MolUpload { name, data };
-                if mol_num == 1 {
-                    self.mol1 = Some(upload);
-                } else {
-                    self.mol2 = Some(upload);
-                }
-                self.file_rx = None;
             }
         }
     }
@@ -895,7 +736,7 @@ impl TwobodyTab {
 
     fn pick_scan_file(&mut self) {
         const FILTER: (&str, &[&str]) = ("Duello scan", &["duello"]);
-        // Native: blocking dialog, as `pick_file` does, so no channel is needed.
+        // Native: a blocking dialog, so no channel is needed.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(FILTER.0, FILTER.1)
@@ -934,8 +775,8 @@ impl TwobodyTab {
         }
     }
 
-    /// Replaces the shown result and inputs with the imported scan's. The
-    /// molecules are cleared: they no longer match what the panel describes.
+    /// Replaces the shown result and inputs with the imported scan's; its
+    /// solution reaches the conditions via `take_import`.
     fn import_scan(&mut self, bytes: &[u8]) {
         // A running scan streams into `plot_cache`; an import would mix into it.
         if !matches!(self.status, ComputeStatus::Idle) {
@@ -952,11 +793,7 @@ impl TwobodyTab {
             .then(|| format!("Imported scan uses model '{model}', which the panel can't select"));
         self.error = warning.or_else(|| (!self.gpu_available).then(|| NO_GPU.to_string()));
         self.inputs = ScanInputs::from_settings(&result.settings, self.inputs.model);
-        // Molecules, including uploads or fetches still in flight, no longer
-        // match the panel, which now describes the imported scan.
-        self.mol1 = None;
-        self.mol2 = None;
-        self.file_rx = None;
+        self.imported = Some(result.settings.clone());
         self.install_result(result);
     }
 
@@ -973,28 +810,24 @@ impl TwobodyTab {
     }
 }
 
-/// Fetch a URL and return its body as bytes (WASM only).
-#[cfg(target_arch = "wasm32")]
-async fn fetch_url(url: &str) -> anyhow::Result<Vec<u8>> {
-    use wasm_bindgen::JsCast;
-    use wasm_bindgen_futures::JsFuture;
-
-    let window = web_sys::window().unwrap();
-    let resp_value = JsFuture::from(window.fetch_with_str(url))
-        .await
-        .map_err(|e| anyhow::anyhow!("fetch failed: {e:?}"))?;
-    let resp: web_sys::Response = resp_value
-        .dyn_into()
-        .map_err(|_| anyhow::anyhow!("not a Response"))?;
-    if !resp.ok() {
-        anyhow::bail!("HTTP {}", resp.status());
-    }
-    let buf = JsFuture::from(
-        resp.array_buffer()
-            .map_err(|_| anyhow::anyhow!("no array_buffer"))?,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("array_buffer failed: {e:?}"))?;
-    let array = js_sys::Uint8Array::new(&buf);
-    Ok(array.to_vec())
+/// Combo over the loaded structures for one molecule slot.
+fn molecule_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    slot: &mut Option<StructureId>,
+    structures: &Structures,
+) {
+    let name = |id| structures.get(id).map(|f| f.name.as_str());
+    egui::ComboBox::from_id_salt(label)
+        .selected_text(slot.and_then(name).unwrap_or("—"))
+        .show_ui(ui, |ui| {
+            for (id, name) in structures.list() {
+                ui.selectable_value(slot, Some(id), name);
+            }
+        })
+        .response
+        .on_hover_text(
+            "A structure loaded in Onebody. Picking the same one for both molecules \
+            scans a homo-dimer, which Manybody needs.",
+        );
 }

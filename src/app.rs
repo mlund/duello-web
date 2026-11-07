@@ -1,9 +1,14 @@
+use crate::conditions::SolutionConditions;
 use crate::manybody::ManybodyTab;
 use crate::onebody::OnebodyTab;
+use crate::structures::Structures;
 use crate::twobody::TwobodyTab;
 
 pub struct DuelloApp {
     tab: Tab,
+    /// Inputs shared by the tabs; Onebody edits them.
+    structures: Structures,
+    conditions: SolutionConditions,
     onebody: OnebodyTab,
     twobody: TwobodyTab,
     manybody: ManybodyTab,
@@ -41,7 +46,9 @@ impl DuelloApp {
         install_fallback_font(&cc.egui_ctx);
         crate::viewer::register(cc);
         Self {
-            tab: Tab::Twobody,
+            tab: Tab::Onebody,
+            structures: Structures::default(),
+            conditions: SolutionConditions::default(),
             onebody: OnebodyTab,
             twobody: TwobodyTab::new(),
             manybody: Default::default(),
@@ -51,7 +58,7 @@ impl DuelloApp {
     fn ui_tab_strip(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.tab, Tab::Onebody, "Onebody")
-                .on_hover_text("Properties of a single molecule");
+                .on_hover_text("Structures and solution conditions shared by every tab");
             ui.selectable_value(&mut self.tab, Tab::Twobody, "Twobody")
                 .on_hover_text(
                     "Orientation-averaged potential of mean force between two molecules",
@@ -65,13 +72,21 @@ impl DuelloApp {
 impl eframe::App for DuelloApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.structures.poll();
         self.twobody.poll(&ctx);
         egui::Panel::top("tabs").show(ui, |ui| self.ui_tab_strip(ui));
         self.manybody.tick(self.twobody.archive());
         match self.tab {
-            Tab::Onebody => self.onebody.ui(ui),
-            Tab::Twobody => self.twobody.ui(ui),
+            Tab::Onebody => self
+                .onebody
+                .ui(ui, &mut self.structures, &mut self.conditions),
+            Tab::Twobody => self.twobody.ui(ui, &self.structures, &self.conditions),
             Tab::Manybody => self.manybody.ui(ui, self.twobody.archive()),
+        }
+        // After the tabs: a native import finishes inside Twobody's UI.
+        if let Some(settings) = self.twobody.take_import() {
+            self.conditions.adopt(&settings);
+            ctx.request_repaint();
         }
         // A busy many-body tab (running, GPU setup, late frames) needs frames.
         if self.manybody.is_busy() {

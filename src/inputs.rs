@@ -1,3 +1,4 @@
+use crate::conditions::SolutionConditions;
 use duello::web_api::ScanSettings;
 use duello::Subdivision;
 
@@ -45,69 +46,62 @@ pub enum CgPolicy {
     Multi,
 }
 
-/// Scan parameters editable in the UI.
+/// Twobody's own scan parameters; the solution comes from
+/// [`SolutionConditions`], and a homo-dimer from picking one structure twice.
 #[derive(Clone)]
 pub struct ScanInputs {
     pub rmin: f64,
     pub rmax: f64,
     pub dr: f64,
-    pub molarity: f64,
-    pub temperature: f64,
     pub max_ndiv: usize,
     pub subdivision: Subdivision,
     pub gradient_threshold: f64,
     pub cutoff: f64,
     pub grid_size: usize,
-    pub ph: f64,
     pub model: Model,
     pub cg: CgPolicy,
-    pub homo_dimer: bool,
-}
-
-impl From<&ScanInputs> for ScanSettings {
-    fn from(inputs: &ScanInputs) -> Self {
-        Self {
-            ph: inputs.ph,
-            model: inputs.model.name().to_string(),
-            single_bead: inputs.cg == CgPolicy::Single,
-            rmin: inputs.rmin,
-            rmax: inputs.rmax,
-            dr: inputs.dr,
-            ionic_strength: inputs.molarity,
-            temperature: inputs.temperature,
-            max_ndiv: inputs.max_ndiv,
-            gradient_threshold: inputs.gradient_threshold,
-            cutoff: inputs.cutoff,
-            grid_size: inputs.grid_size,
-            homo_dimer: inputs.homo_dimer,
-            subdivision: inputs.subdivision,
-        }
-    }
 }
 
 impl ScanInputs {
-    /// Inputs matching an imported scan, so the panel describes what's shown.
+    /// `homo_dimer` is left false: only the structures can tell.
+    pub fn settings(&self, conditions: &SolutionConditions) -> ScanSettings {
+        ScanSettings {
+            ph: conditions.ph,
+            model: self.model.name().to_string(),
+            single_bead: self.cg == CgPolicy::Single,
+            rmin: self.rmin,
+            rmax: self.rmax,
+            dr: self.dr,
+            ionic_strength: conditions.ionic_strength,
+            temperature: conditions.temperature,
+            max_ndiv: self.max_ndiv,
+            gradient_threshold: self.gradient_threshold,
+            cutoff: self.cutoff,
+            grid_size: self.grid_size,
+            homo_dimer: false,
+            subdivision: self.subdivision,
+        }
+    }
+
+    /// Inputs matching an imported scan, so the panel describes what's shown;
+    /// [`SolutionConditions::adopt`] takes the rest.
     /// A model the UI can't select leaves `fallback` chosen; callers warn.
     pub fn from_settings(s: &ScanSettings, fallback: Model) -> Self {
         Self {
             rmin: s.rmin,
             rmax: s.rmax,
             dr: s.dr,
-            molarity: s.ionic_strength,
-            temperature: s.temperature,
             max_ndiv: s.max_ndiv,
             subdivision: s.subdivision,
             gradient_threshold: s.gradient_threshold,
             cutoff: s.cutoff,
             grid_size: s.grid_size,
-            ph: s.ph,
             model: Model::from_name(&s.model).unwrap_or(fallback),
             cg: if s.single_bead {
                 CgPolicy::Single
             } else {
                 CgPolicy::Multi
             },
-            homo_dimer: s.homo_dimer,
         }
     }
 }
@@ -118,17 +112,13 @@ impl Default for ScanInputs {
             rmin: 26.0,
             rmax: 60.0,
             dr: 1.0,
-            molarity: 0.1,
-            temperature: 298.15,
             max_ndiv: 2,
             subdivision: Subdivision::default(),
             gradient_threshold: 0.5,
             cutoff: 20.0,
             grid_size: 200,
-            ph: 7.0,
             model: Model::Calvados3,
             cg: CgPolicy::Single,
-            homo_dimer: false,
         }
     }
 }
@@ -136,6 +126,7 @@ impl Default for ScanInputs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conditions::SolutionConditions;
 
     #[test]
     fn model_names_from_archives_map_back_to_ui_models() {
@@ -144,33 +135,57 @@ mod tests {
         assert_eq!(Model::from_name("custom topology"), None);
     }
 
+    /// Onebody owns the solution, so the scan takes it from there.
     #[test]
-    fn imported_settings_restore_the_inputs_they_came_from() {
+    fn settings_take_the_solution_from_the_conditions() {
+        let conditions = SolutionConditions {
+            temperature: 310.0,
+            ph: 4.5,
+            ionic_strength: 0.02,
+        };
+        let settings = ScanInputs::default().settings(&conditions);
+        assert_eq!(
+            (settings.temperature, settings.ph, settings.ionic_strength),
+            (310.0, 4.5, 0.02)
+        );
+        assert_eq!(
+            (settings.rmin, settings.rmax, settings.dr),
+            (26.0, 60.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn imported_settings_restore_the_inputs_and_conditions_they_came_from() {
         let inputs = ScanInputs {
             model: Model::Pasquier,
             cg: CgPolicy::Multi,
-            ph: 4.5,
-            homo_dimer: true,
             subdivision: Subdivision::Lattice,
             ..Default::default()
         };
-        let restored = ScanInputs::from_settings(&ScanSettings::from(&inputs), Model::Calvados3);
+        let conditions = SolutionConditions {
+            temperature: 310.0,
+            ph: 4.5,
+            ionic_strength: 0.02,
+        };
+        let settings = inputs.settings(&conditions);
+        let restored = ScanInputs::from_settings(&settings, Model::Calvados3);
         assert_eq!(
-            (restored.model, restored.cg, restored.ph),
-            (Model::Pasquier, CgPolicy::Multi, 4.5)
+            (restored.model, restored.cg, restored.subdivision),
+            (Model::Pasquier, CgPolicy::Multi, Subdivision::Lattice)
         );
-        assert_eq!(restored.subdivision, Subdivision::Lattice);
-        assert!(restored.homo_dimer);
+        let mut adopted = SolutionConditions::default();
+        adopted.adopt(&settings);
+        assert_eq!(adopted, conditions);
     }
 
     /// The panel must still show the scan's numbers when its model isn't selectable.
     #[test]
     fn unknown_models_keep_the_current_choice_but_restore_settings() {
-        let mut settings = ScanSettings::from(&ScanInputs::default());
+        let mut settings = ScanInputs::default().settings(&Default::default());
         settings.model = "custom topology".into();
-        settings.ionic_strength = 0.5;
+        settings.rmax = 80.0;
         let restored = ScanInputs::from_settings(&settings, Model::KimHummer);
         assert_eq!(restored.model, Model::KimHummer);
-        assert_eq!(restored.molarity, 0.5);
+        assert_eq!(restored.rmax, 80.0);
     }
 }
