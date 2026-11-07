@@ -68,7 +68,8 @@ fn run_rows(ui: &mut egui::Ui, progress: Progress) {
             ),
             (
                 "Sweep",
-                "Sweeps per copy so far; a sweep is one move per molecule",
+                "Sweeps per copy so far. A sweep is N attempted moves, each on a randomly \
+                 picked molecule, so one attempt per molecule on average",
                 progress.sweep.to_string(),
             ),
             (
