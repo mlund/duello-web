@@ -72,7 +72,10 @@ pub fn ui(ui: &mut Ui, phase: Phase, blocked: Option<&str>, can_reset: bool) -> 
         let response = ui
             .add_enabled(enabled, button)
             .on_hover_text(primary_tip(phase))
-            .on_disabled_hover_text(blocked.unwrap_or(primary_tip(phase)));
+            .on_disabled_hover_text(match (phase, blocked) {
+                (Phase::Idle, Some(why)) => why,
+                _ => primary_tip(phase),
+            });
         let left = pos2(
             response.rect.left() + 0.5 * response.rect.height(),
             response.rect.center().y,

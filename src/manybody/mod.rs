@@ -278,18 +278,19 @@ impl ManybodyTab {
         // changed since the run started.
         let blocked = self.start_blocker(archive, molarity);
         let phase = self.phase();
-        if let Some(action) = controls::ui(ui, phase, blocked, self.can_reset()) {
+        if let Some(action) = controls::ui(ui, phase, blocked, self.can_reset(phase)) {
             self.act(action, archive, molarity);
         }
-        self.ui_status_line(ui, blocked, molarity);
+        let phase = self.phase();
+        self.ui_status_line(ui, phase, blocked, molarity);
         if let Some(e) = &self.error {
             ui.colored_label(egui::Color32::RED, e);
         }
         let Some(archive) = archive else {
             return;
         };
-        let idle = !self.running && self.starting.is_none();
-        ui.add_enabled_ui(idle, |ui| {
+        // Inputs describe the next run, which only Stop then Run starts.
+        ui.add_enabled_ui(phase == Phase::Idle, |ui| {
             section(ui, "Monte Carlo");
             self.ui_box(ui, archive, conditions);
             ui.checkbox(&mut self.record_trajectory, "Record trajectory")
@@ -318,12 +319,17 @@ impl ManybodyTab {
         }
     }
 
-    fn can_reset(&self) -> bool {
+    fn can_reset(&self, phase: Phase) -> bool {
         let producing = matches!(
             self.progress.map(|p| p.stage),
             Some(Stage::Production { .. })
         );
-        producing && matches!(self.phase(), Phase::Running | Phase::Paused)
+        producing && matches!(phase, Phase::Running | Phase::Paused)
+    }
+
+    /// Periodic images must stay beyond the table's reach.
+    fn box_fits(&self, archive: &ScanArchive, molarity: f64) -> bool {
+        self.box_length(molarity) >= 2.0 * archive.table.rmax
     }
 
     /// Why a new run can't start, if it can't.
@@ -331,7 +337,7 @@ impl ManybodyTab {
         let Some(archive) = archive else {
             return Some("Run or import a scan of two identical molecules in Twobody first");
         };
-        (self.box_length(molarity) < 2.0 * archive.table.rmax)
+        (!self.box_fits(archive, molarity))
             .then_some("The box is smaller than the table: increase N")
     }
 
@@ -351,9 +357,15 @@ impl ManybodyTab {
     }
 
     /// One line under the controls: what the run is doing, or why it can't start.
-    fn ui_status_line(&self, ui: &mut egui::Ui, blocked: Option<&str>, molarity: f64) {
+    fn ui_status_line(
+        &self,
+        ui: &mut egui::Ui,
+        phase: Phase,
+        blocked: Option<&str>,
+        molarity: f64,
+    ) {
         let sweeps = |p: Option<Progress>| p.map_or(0, |p| p.sweep);
-        match self.phase() {
+        match phase {
             Phase::Starting => {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -422,7 +434,7 @@ impl ManybodyTab {
                 ));
         }
         let needed = 2.0 * archive.table.rmax;
-        if l < needed {
+        if !self.box_fits(archive, molarity) {
             ui.colored_label(
                 egui::Color32::LIGHT_RED,
                 format!("Box below the table's {needed:.0} Å: increase N"),
@@ -701,8 +713,6 @@ impl ManybodyTab {
         }
     }
 
-    /// Pause keeps the run, unlike Stop; a paused run can also be
-    /// replaced by pressing Run.
     fn reset_statistics(&mut self) {
         let Some(run) = &mut self.run else { return };
         match run.reset_statistics() {
@@ -720,8 +730,17 @@ impl ManybodyTab {
     fn stop(&mut self) {
         if let Some(run) = &mut self.run {
             run.stop();
-            // A zero-sweep step just reports the stopped state.
-            self.progress = run.step(0).ok();
+            // A zero-sweep step just reports the stopped state; if even that
+            // fails, the last progress stands, marked stopped.
+            let last = self.progress.map(|p| Progress {
+                stage: Stage::Stopped,
+                ..p
+            });
+            self.progress = run.step(0).ok().or(last);
+        }
+        // A run that never reported progress has nothing to keep.
+        if self.progress.is_none() {
+            self.run = None;
         }
         self.running = false;
     }

@@ -20,8 +20,9 @@ use std::sync::Arc;
 const NO_GPU: &str =
     "No GPU/WebGPU adapter found. A WebGPU-capable browser is required (Chrome 113+, Edge 113+).";
 
-/// Typical protein separations; typed values may go past either end.
-const R_SLIDER: std::ops::RangeInclusive<f64> = 0.0..=150.0;
+/// Typical protein separations; typed values may go past either end. Not
+/// from 0, which a drag would otherwise reach: full overlap.
+const R_SLIDER: std::ops::RangeInclusive<f64> = 5.0..=150.0;
 
 fn subdivision_label(scheme: Subdivision) -> &'static str {
     match scheme {
@@ -303,7 +304,7 @@ impl TwobodyTab {
         // --- Validation & Run ---
         let mut validation_errors = Vec::new();
         if self.inputs.rmin >= self.inputs.rmax {
-            validation_errors.push("R min must be less than R max");
+            validation_errors.push("The R range must have a lower end below its upper end");
         }
         if self.inputs.dr <= 0.0 {
             validation_errors.push("\u{0394}R must be positive");
