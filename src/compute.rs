@@ -56,7 +56,7 @@ mod tests {
     /// or Manybody refuses the scan.
     #[test]
     fn identical_structures_make_a_homo_dimer() {
-        let settings = || ScanInputs::default().settings(&Default::default());
+        let settings = || ScanInputs::default().settings(&Default::default(), &Default::default());
         let pdb = b"ATOM ...".to_vec();
         assert!(
             build_request(settings(), pdb.clone(), pdb.clone())

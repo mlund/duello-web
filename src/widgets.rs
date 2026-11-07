@@ -17,3 +17,15 @@ pub fn row(
     widget(ui).on_hover_text(tip);
     ui.end_row();
 }
+
+/// Tooltip for a value shown read-only outside Onebody, which owns it.
+pub fn set_in_onebody(tip: &str) -> String {
+    format!("{tip}\n\nSet in Onebody.")
+}
+
+/// Gap and rule between panel sections.
+pub fn section(ui: &mut egui::Ui) {
+    ui.add_space(6.0);
+    ui.separator();
+    ui.add_space(2.0);
+}

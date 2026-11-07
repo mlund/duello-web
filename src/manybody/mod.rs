@@ -9,7 +9,7 @@ mod stats;
 mod windows;
 
 use crate::conditions::SolutionConditions;
-use crate::widgets::grid;
+use crate::widgets::{grid, set_in_onebody};
 use duello::archive::{CgBody, ScanArchive};
 use duello::nbody::{
     box_length, Device, HsyFluid, MsaOverrides, NBodyRun, Progress, RunSpec, Scattering, Stage,
@@ -363,8 +363,8 @@ impl ManybodyTab {
             ui.add(egui::DragValue::new(&mut self.n_bodies).range(2..=2000))
                 .on_hover_text("Molecules in the periodic box; more lowers q_min");
             ui.end_row();
-            let tip = "Protein molarity; with N it sets the box size. Set in Onebody.";
-            ui.label("Concentration").on_hover_text(tip);
+            let tip = set_in_onebody("Protein molarity; with N it sets the box size");
+            ui.label("Concentration").on_hover_text(&tip);
             ui.label(format!("{:.2} mM", conditions.protein_millimolar))
                 .on_hover_text(tip);
             ui.end_row();
@@ -833,9 +833,7 @@ fn overridable(
 
 /// A Twobody-style heading: rule, bold title.
 fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(6.0);
-    ui.separator();
-    ui.add_space(2.0);
+    crate::widgets::section(ui);
     ui.strong(title);
     ui.add_space(2.0);
 }

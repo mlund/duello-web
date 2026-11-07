@@ -17,8 +17,17 @@ struct Loaded {
     file: Result<StructureFile, String>,
 }
 
+struct Entry {
+    id: StructureId,
+    /// `name` is what the user calls it, saved with a session.
+    file: StructureFile,
+    /// Restored when a rename is cleared: the name as loaded, or as saved in a
+    /// session, which keeps no other.
+    file_name: String,
+}
+
 pub struct Structures {
-    entries: Vec<(StructureId, StructureFile)>,
+    entries: Vec<Entry>,
     next_id: u64,
     /// PDB ID typed for fetching.
     pdb_id: String,
@@ -27,6 +36,19 @@ pub struct Structures {
     /// Fetches in flight, shown so a slow one doesn't look ignored.
     pending: usize,
     error: Option<String>,
+    /// May name a removed entry; [`Self::selected`] then falls back.
+    selected: Option<StructureId>,
+    /// Entry being renamed, with the text typed so far.
+    editing: Option<(StructureId, String)>,
+}
+
+/// What a click in the list asks for, applied after the rows are drawn.
+enum RowAction {
+    Select(StructureId),
+    Edit(StructureId),
+    Rename(StructureId, String),
+    CancelEdit,
+    Remove(StructureId),
 }
 
 impl Default for Structures {
@@ -40,45 +62,83 @@ impl Default for Structures {
             rx,
             pending: 0,
             error: None,
+            selected: None,
+            editing: None,
         }
     }
 }
 
 impl Structures {
     pub fn get(&self, id: StructureId) -> Option<&StructureFile> {
-        self.entries.iter().find(|(i, _)| *i == id).map(|(_, f)| f)
+        self.entry(id).map(|e| &e.file)
+    }
+
+    fn entry(&self, id: StructureId) -> Option<&Entry> {
+        self.entries.iter().find(|e| e.id == id)
+    }
+
+    fn entry_mut(&mut self, id: StructureId) -> Option<&mut Entry> {
+        self.entries.iter_mut().find(|e| e.id == id)
     }
 
     /// Ids and names in load order.
     pub fn list(&self) -> impl Iterator<Item = (StructureId, &str)> {
-        self.entries.iter().map(|(id, f)| (*id, f.name.as_str()))
+        self.entries.iter().map(|e| (e.id, e.file.name.as_str()))
     }
 
     /// Position in load order, as a saved session indexes structures.
     pub fn index_of(&self, id: StructureId) -> Option<usize> {
-        self.entries.iter().position(|(i, _)| *i == id)
+        self.entries.iter().position(|e| e.id == id)
     }
 
     /// Copies, in load order, for a saved session.
     pub fn files(&self) -> Vec<StructureFile> {
-        self.entries.iter().map(|(_, f)| f.clone()).collect()
+        self.entries.iter().map(|e| e.file.clone()).collect()
+    }
+
+    /// The entry the analysis shows: the one picked, else the first.
+    pub fn selected(&self) -> Option<StructureId> {
+        (self.selected)
+            .filter(|&id| self.entry(id).is_some())
+            .or_else(|| self.first())
+    }
+
+    pub fn select(&mut self, id: StructureId) {
+        self.selected = Some(id);
+    }
+
+    pub fn remove(&mut self, id: StructureId) {
+        self.entries.retain(|e| e.id != id);
+    }
+
+    /// A blank name falls back to the name it was loaded with.
+    pub fn rename(&mut self, id: StructureId, name: &str) {
+        if let Some(entry) = self.entry_mut(id) {
+            let name = name.trim();
+            entry.file.name = if name.is_empty() {
+                entry.file_name.clone()
+            } else {
+                name.to_string()
+            };
+        }
     }
 
     /// Replaces the list with a saved session's, returning the new ids in
     /// the same order.
     pub fn replace(&mut self, files: Vec<StructureFile>) -> Vec<StructureId> {
         self.entries.clear();
+        self.editing = None;
         files
             .into_iter()
             .map(|file| {
                 self.push(file);
-                self.entries.last().unwrap().0
+                self.entries.last().unwrap().id
             })
             .collect()
     }
 
     pub fn first(&self) -> Option<StructureId> {
-        self.entries.first().map(|(id, _)| *id)
+        self.entries.first().map(|e| e.id)
     }
 
     /// Takes finished fetches and picks; call every frame.
@@ -93,7 +153,11 @@ impl Structures {
     }
 
     fn push(&mut self, file: StructureFile) {
-        self.entries.push((StructureId(self.next_id), file));
+        self.entries.push(Entry {
+            id: StructureId(self.next_id),
+            file_name: file.name.clone(),
+            file,
+        });
         self.next_id += 1;
         self.error = None;
     }
@@ -118,24 +182,27 @@ impl Structures {
             ui.weak("None loaded")
                 .on_hover_text("Add a structure below; Twobody scans one or two of them");
         }
-        let mut removed = None;
-        for (id, file) in &self.entries {
-            ui.horizontal(|ui| {
-                ui.label(&file.name).on_hover_text(format!(
-                    "{} kB as loaded; select it as a molecule in Twobody",
-                    file.contents.len().div_ceil(1024)
-                ));
-                if ui
-                    .small_button("✖")
-                    .on_hover_text("Remove this structure")
-                    .clicked()
-                {
-                    removed = Some(*id);
-                }
-            });
+        let selected = self.selected();
+        let mut action = None;
+        for entry in &self.entries {
+            let row = match &mut self.editing {
+                Some((id, text)) if *id == entry.id => rename_row(ui, entry.id, text),
+                _ => entry_row(ui, entry, selected == Some(entry.id)),
+            };
+            action = row.or(action);
         }
-        if let Some(id) = removed {
-            self.entries.retain(|(i, _)| *i != id);
+        match action {
+            Some(RowAction::Select(id)) => self.select(id),
+            Some(RowAction::Edit(id)) => {
+                self.editing = self.get(id).map(|f| (id, f.name.clone()));
+            }
+            Some(RowAction::Rename(id, name)) => {
+                self.rename(id, &name);
+                self.editing = None;
+            }
+            Some(RowAction::CancelEdit) => self.editing = None,
+            Some(RowAction::Remove(id)) => self.remove(id),
+            None => {}
         }
     }
 
@@ -232,6 +299,50 @@ impl Structures {
     }
 }
 
+/// One entry: select by clicking its name, ✏ to rename, ✖ to remove.
+fn entry_row(ui: &mut egui::Ui, entry: &Entry, selected: bool) -> Option<RowAction> {
+    let file = &entry.file;
+    ui.horizontal(|ui| {
+        let name = ui
+            .selectable_label(selected, &file.name)
+            .on_hover_text(format!(
+                "Loaded as {} ({} kB). Click to analyse it here; Twobody picks from this list.",
+                entry.file_name,
+                file.contents.len().div_ceil(1024)
+            ));
+        let edit = ui
+            .small_button("✏")
+            .on_hover_text("Rename; an empty name restores the file name");
+        let remove = ui.small_button("✖").on_hover_text("Remove this structure");
+        if remove.clicked() {
+            Some(RowAction::Remove(entry.id))
+        } else if edit.clicked() {
+            Some(RowAction::Edit(entry.id))
+        } else {
+            name.clicked().then_some(RowAction::Select(entry.id))
+        }
+    })
+    .inner
+}
+
+/// The entry being renamed, in place of its row. Enter or clicking away commits;
+/// Escape cancels.
+fn rename_row(ui: &mut egui::Ui, id: StructureId, text: &mut String) -> Option<RowAction> {
+    let response = ui
+        .add(egui::TextEdit::singleline(text).desired_width(160.0))
+        .on_hover_text("Enter to rename, Escape to cancel; empty restores the file name");
+    if !response.has_focus() && !response.lost_focus() {
+        response.request_focus();
+    }
+    response.lost_focus().then(|| {
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            RowAction::CancelEdit
+        } else {
+            RowAction::Rename(id, text.clone())
+        }
+    })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn fetch_url(url: &str) -> anyhow::Result<Vec<u8>> {
     let response = ureq::get(url).call()?;
@@ -262,4 +373,51 @@ async fn fetch_url(url: &str) -> anyhow::Result<Vec<u8>> {
     .await
     .map_err(|e| anyhow::anyhow!("array_buffer failed: {e:?}"))?;
     Ok(js_sys::Uint8Array::new(&buf).to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(name: &str, contents: &[u8]) -> StructureFile {
+        StructureFile {
+            name: name.into(),
+            contents: contents.to_vec(),
+        }
+    }
+
+    fn loaded(names: &[&str]) -> (Structures, Vec<StructureId>) {
+        let mut structures = Structures::default();
+        let ids = structures.replace(names.iter().map(|n| file(n, n.as_bytes())).collect());
+        (structures, ids)
+    }
+
+    /// A saved session carries the custom name; clearing it brings the file name back.
+    #[test]
+    fn rename_keeps_id_and_contents_and_empty_restores_the_file_name() {
+        let (mut structures, ids) = loaded(&["2CDS.pdb", "1UBQ.pdb"]);
+        structures.rename(ids[0], "Lysozyme (pH 4)");
+        assert_eq!(
+            structures.get(ids[0]),
+            Some(&file("Lysozyme (pH 4)", b"2CDS.pdb"))
+        );
+        assert_eq!(structures.files()[0].name, "Lysozyme (pH 4)");
+        structures.rename(ids[0], "  ");
+        assert_eq!(structures.get(ids[0]).unwrap().name, "2CDS.pdb");
+        assert_eq!(structures.get(ids[1]).unwrap().name, "1UBQ.pdb");
+    }
+
+    /// The analysis follows a selection; removing it falls back to the first entry.
+    #[test]
+    fn selection_defaults_to_first_and_survives_removal_of_others() {
+        let (mut structures, ids) = loaded(&["a.pdb", "b.pdb", "c.pdb"]);
+        assert_eq!(structures.selected(), Some(ids[0]));
+        structures.select(ids[2]);
+        structures.remove(ids[1]);
+        assert_eq!(structures.selected(), Some(ids[2]));
+        structures.remove(ids[2]);
+        assert_eq!(structures.selected(), Some(ids[0]));
+        structures.remove(ids[0]);
+        assert_eq!(structures.selected(), None);
+    }
 }

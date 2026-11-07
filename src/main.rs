@@ -2,6 +2,7 @@ mod app;
 mod compute;
 mod conditions;
 mod files;
+mod forcefield;
 mod inputs;
 mod manybody;
 mod onebody;

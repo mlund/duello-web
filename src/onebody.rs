@@ -1,9 +1,11 @@
 use crate::conditions::SolutionConditions;
+use crate::forcefield::ForceField;
 use crate::structures::Structures;
+use crate::widgets::section;
 use duello::archive::CgBody;
 
-/// Home of the inputs every tab shares: structures and solution conditions.
-/// The central area is kept for purrette's single-molecule analysis.
+/// Home of the inputs every tab shares: structures, force field and solution
+/// conditions. The central area is kept for single-molecule analysis.
 pub struct OnebodyTab;
 
 impl OnebodyTab {
@@ -12,6 +14,7 @@ impl OnebodyTab {
         ui: &mut egui::Ui,
         structures: &mut Structures,
         conditions: &mut SolutionConditions,
+        forcefield: &mut ForceField,
         scanned_body: Option<&CgBody>,
     ) {
         egui::Panel::left("onebody_inputs")
@@ -21,9 +24,12 @@ impl OnebodyTab {
                     ui.strong("Structures");
                     ui.add_space(2.0);
                     structures.ui(ui);
-                    ui.add_space(6.0);
-                    ui.separator();
+                    section(ui);
+                    ui.strong("Force field")
+                        .on_hover_text("Shared by every tab");
                     ui.add_space(2.0);
+                    forcefield.ui(ui);
+                    section(ui);
                     ui.strong("Solution conditions")
                         .on_hover_text("Shared by every tab");
                     ui.add_space(2.0);

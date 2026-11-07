@@ -3,8 +3,10 @@ use crate::conditions::SolutionConditions;
 #[cfg(target_arch = "wasm32")]
 use crate::files::download_bytes_as_file;
 use crate::files::save_file;
-use crate::inputs::{CgPolicy, Model, ScanInputs};
+use crate::forcefield::ForceField;
+use crate::inputs::ScanInputs;
 use crate::structures::{StructureId, Structures};
+use crate::widgets::section;
 use duello::archive::{Session, StructureFile};
 use duello::web_api::{PmfPoint, ScanProgress, ScanSettings};
 use duello::Subdivision;
@@ -131,6 +133,11 @@ impl TwobodyTab {
         self.imported.take()
     }
 
+    /// Shown in the panel, e.g. why an import couldn't restore everything.
+    pub fn warn(&mut self, message: String) {
+        self.error = Some(message);
+    }
+
     /// Picks the restored pair, as the scan shown was made from it.
     pub fn select_scanned(&mut self, pair: [StructureId; 2]) {
         self.selected = pair.map(Some);
@@ -142,12 +149,13 @@ impl TwobodyTab {
         ui: &mut egui::Ui,
         structures: &Structures,
         conditions: &SolutionConditions,
+        forcefield: &ForceField,
     ) {
         let is_dark = ui.visuals().dark_mode;
         self.keep_selection_valid(structures);
         egui::Panel::left("inputs").min_size(220.0).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                self.ui_left_panel(ui, structures, conditions);
+                self.ui_left_panel(ui, structures, conditions, forcefield);
             });
         });
 
@@ -178,54 +186,24 @@ impl TwobodyTab {
         ui: &mut egui::Ui,
         structures: &Structures,
         conditions: &SolutionConditions,
+        forcefield: &ForceField,
     ) {
         // --- Molecules ---
         ui.strong("Molecules");
         ui.add_space(2.0);
         self.ui_molecules(ui, structures);
 
-        ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(2.0);
+        section(ui);
 
         // --- Force field ---
         ui.strong("Force field");
         ui.add_space(2.0);
+        forcefield.summary_ui(ui);
+        if let Some(why) = (self.result.as_ref()).and_then(|r| forcefield.stale(&r.settings)) {
+            differs_from_scan(ui, &why, "force field");
+        }
 
-        egui::Grid::new("ff_grid")
-            .num_columns(2)
-            .spacing([8.0, 4.0])
-            .show(ui, |ui| {
-                ui.label("Model");
-                egui::ComboBox::from_id_salt("model_combo")
-                    .selected_text(self.inputs.model.label())
-                    .show_ui(ui, |ui| {
-                        for model in Model::ALL {
-                            ui.selectable_value(&mut self.inputs.model, model, model.label());
-                        }
-                    })
-                    .response
-                    .on_hover_text("Residue-level force field for the short-range pair energy");
-                ui.end_row();
-
-                ui.label("CG policy");
-                egui::ComboBox::from_id_salt("cg_combo")
-                    .selected_text(match self.inputs.cg {
-                        CgPolicy::Single => "Single bead",
-                        CgPolicy::Multi => "Multi bead",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.inputs.cg, CgPolicy::Single, "Single bead");
-                        ui.selectable_value(&mut self.inputs.cg, CgPolicy::Multi, "Multi bead");
-                    })
-                    .response
-                    .on_hover_text("One bead per residue, or several per residue");
-                ui.end_row();
-            });
-
-        ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(2.0);
+        section(ui);
 
         // --- Solution ---
         ui.strong("Solution");
@@ -233,13 +211,10 @@ impl TwobodyTab {
 
         conditions.summary_ui(ui);
         if let Some(why) = (self.result.as_ref()).and_then(|r| conditions.stale(&r.settings)) {
-            ui.colored_label(egui::Color32::YELLOW, "Differs from the shown scan")
-                .on_hover_text(format!("{why}. Run a new scan to use the conditions above"));
+            differs_from_scan(ui, &why, "conditions");
         }
 
-        ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(2.0);
+        section(ui);
 
         // --- Scan range ---
         ui.strong("Scan range");
@@ -366,7 +341,7 @@ impl TwobodyTab {
                 )
                 .clicked()
             {
-                self.start_scan(structures, conditions);
+                self.start_scan(structures, conditions, forcefield);
             }
             if matches!(self.status, ComputeStatus::Running { .. })
                 && ui
@@ -540,7 +515,12 @@ impl TwobodyTab {
             });
     }
 
-    fn start_scan(&mut self, structures: &Structures, conditions: &SolutionConditions) {
+    fn start_scan(
+        &mut self,
+        structures: &Structures,
+        conditions: &SolutionConditions,
+        forcefield: &ForceField,
+    ) {
         let Some([mol1, mol2]) = self.pair(structures) else {
             return;
         };
@@ -574,7 +554,7 @@ impl TwobodyTab {
             }
         };
 
-        let settings = self.inputs.settings(conditions);
+        let settings = self.inputs.settings(conditions, forcefield);
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -778,12 +758,8 @@ impl TwobodyTab {
             Ok(result) => result,
             Err(e) => return self.error = Some(format!("Import failed: {e:#}")),
         };
-        let model = &result.settings.model;
-        let warning = Model::from_name(model)
-            .is_none()
-            .then(|| format!("Imported scan uses model '{model}', which the panel can't select"));
-        self.error = warning.or_else(|| (!self.gpu_available).then(|| NO_GPU.to_string()));
-        self.inputs = ScanInputs::from_settings(&result.settings, self.inputs.model);
+        self.error = (!self.gpu_available).then(|| NO_GPU.to_string());
+        self.inputs = ScanInputs::from_settings(&result.settings);
         let session = std::mem::take(&mut result.session);
         self.imported = Some((result.settings.clone(), session));
         self.scanned = None;
@@ -801,6 +777,12 @@ impl TwobodyTab {
         }
         self.download_string(&csv, "pmf.csv");
     }
+}
+
+/// Warns that Onebody's `what` no longer matches the scan on screen.
+fn differs_from_scan(ui: &mut egui::Ui, why: &str, what: &str) {
+    ui.colored_label(egui::Color32::YELLOW, "Differs from the shown scan")
+        .on_hover_text(format!("{why}. Run a new scan to use the {what} above"));
 }
 
 /// Combo over the loaded structures for one molecule slot.

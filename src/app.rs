@@ -1,4 +1,5 @@
 use crate::conditions::SolutionConditions;
+use crate::forcefield::ForceField;
 use crate::manybody::ManybodyTab;
 use crate::onebody::OnebodyTab;
 use crate::structures::Structures;
@@ -11,6 +12,7 @@ pub struct DuelloApp {
     /// Inputs shared by the tabs; Onebody edits them.
     structures: Structures,
     conditions: SolutionConditions,
+    forcefield: ForceField,
     onebody: OnebodyTab,
     twobody: TwobodyTab,
     manybody: ManybodyTab,
@@ -51,6 +53,7 @@ impl DuelloApp {
             tab: Tab::Onebody,
             structures: Structures::default(),
             conditions: SolutionConditions::default(),
+            forcefield: ForceField::default(),
             onebody: OnebodyTab,
             twobody: TwobodyTab::new(),
             manybody: Default::default(),
@@ -76,6 +79,9 @@ impl DuelloApp {
     /// structures, which leaves Onebody's list as it is.
     fn restore(&mut self, settings: &ScanSettings, session: Session) {
         self.conditions.restore(settings, &session);
+        if let Some(warning) = self.forcefield.adopt(settings) {
+            self.twobody.warn(warning);
+        }
         if let Some(run) = &session.run {
             self.manybody.restore(run, self.twobody.archive());
         }
@@ -114,8 +120,8 @@ impl DuelloApp {
         if ui
             .add_enabled(has_scan, egui::Button::new("Save scan…"))
             .on_hover_text(
-                "Table, CG bodies and results, plus every tab's inputs (structures, \
-                 conditions, Manybody), as .duello",
+                "Table, CG bodies and results, plus every tab's inputs (structures \
+                 and their names, force field, conditions, Manybody), as .duello",
             )
             .on_disabled_hover_text("Run or open a scan first")
             .clicked()
@@ -134,7 +140,7 @@ impl DuelloApp {
 
     fn ui_tab_strip(&mut self, ui: &mut egui::Ui) {
         ui.selectable_value(&mut self.tab, Tab::Onebody, "Onebody")
-            .on_hover_text("Structures and solution conditions shared by every tab");
+            .on_hover_text("Structures, force field and solution conditions shared by every tab");
         ui.selectable_value(&mut self.tab, Tab::Twobody, "Twobody")
             .on_hover_text("Orientation-averaged potential of mean force between two molecules");
         ui.selectable_value(&mut self.tab, Tab::Manybody, "Manybody")
@@ -168,10 +174,18 @@ impl eframe::App for DuelloApp {
                 // Z and mass for the estimate, from a molecule Manybody can use.
                 let homo = self.twobody.archive().filter(|a| a.settings.homo_dimer);
                 let body = homo.map(|a| &a.bodies[0]);
-                self.onebody
-                    .ui(ui, &mut self.structures, &mut self.conditions, body)
+                self.onebody.ui(
+                    ui,
+                    &mut self.structures,
+                    &mut self.conditions,
+                    &mut self.forcefield,
+                    body,
+                )
             }
-            Tab::Twobody => self.twobody.ui(ui, &self.structures, &self.conditions),
+            Tab::Twobody => {
+                self.twobody
+                    .ui(ui, &self.structures, &self.conditions, &self.forcefield)
+            }
             Tab::Manybody => self
                 .manybody
                 .ui(ui, self.twobody.archive(), &self.conditions),

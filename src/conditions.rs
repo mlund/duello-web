@@ -1,6 +1,6 @@
 //! The solution every tab works in; set in Onebody, read elsewhere.
 
-use crate::widgets::{grid, row};
+use crate::widgets::{grid, row, set_in_onebody};
 use duello::archive::{CgBody, FreeSaltEstimate, Session};
 use duello::nbody::HsyFluid;
 use duello::solution::{free_salt, protein_volume, FreeSalt};
@@ -230,7 +230,7 @@ impl SolutionConditions {
 
     /// Read-only, for tabs that use the conditions but don't own them.
     pub fn summary_ui(&self, ui: &mut egui::Ui) {
-        let shown = |tip: &str| format!("{tip}\n\nSet in Onebody.");
+        let shown = set_in_onebody;
         grid("conditions_summary").show(ui, |ui| {
             row(ui, "pH", &shown(PH_TIP), |ui| {
                 ui.label(format!("{:.2}", self.ph))
