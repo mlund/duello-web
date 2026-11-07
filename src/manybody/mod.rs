@@ -11,8 +11,9 @@ mod windows;
 use duello::archive::{CgBody, ScanArchive};
 use duello::nbody::{
     box_length, Device, HsyFluid, MsaOverrides, NBodyRun, Progress, RunSpec, Scattering, Stage,
-    PARTIAL_SPECIFIC_VOLUME, RESIDUE_FORM_FACTORS,
+    RESIDUE_FORM_FACTORS,
 };
+use duello::solution::PARTIAL_SPECIFIC_VOLUME;
 use std::future::Future;
 use std::sync::mpsc;
 use windows::Pane;
@@ -82,7 +83,7 @@ struct RunInfo {
     n_bodies: usize,
     copies: usize,
     millimolar: f64,
-    salt_millimolar: f64,
+    ionic_millimolar: f64,
     detailed: bool,
     tune_steps: bool,
 }
@@ -330,11 +331,11 @@ impl ManybodyTab {
         let l = self.box_length();
         ui.label(format!("Box L = {l:.0} Å"))
             .on_hover_text("Cubic box holding N molecules at this concentration");
-        // Debye length for 1:1 salt in water at 25 °C.
-        let debye = 3.04 / archive.settings.molarity.sqrt();
+        // The κ the reference sphere uses, at the scan's temperature.
+        let debye = HsyFluid::for_scan(archive, self.millimolar * 1e-3).debye_length;
         ui.label(format!(
-            "Salt {:.0} mM, Debye length ≈ {debye:.0} Å",
-            archive.settings.molarity * 1e3
+            "Ionic strength {:.0} mM, Debye length ≈ {debye:.0} Å",
+            archive.settings.ionic_strength * 1e3
         ))
         .on_hover_text("Set by the Twobody scan, whose table holds the screened energies");
         let needed = 2.0 * archive.table.rmax;
@@ -513,6 +514,8 @@ impl ManybodyTab {
         spec.rotation = self.rotation;
         spec.tune_steps = self.tune_steps;
         spec.msa = self.msa;
+        // Until the tab offers a toggle, keep the download it always had.
+        spec.record_trajectory = true;
         if !self.detailed {
             // Mass-centre frames cost little next to the sweeps between them.
             spec.sweeps_per_frame = spec.sweeps_per_check;
@@ -582,7 +585,7 @@ impl ManybodyTab {
                     n_bodies: self.n_bodies,
                     copies: self.copies,
                     millimolar: self.millimolar,
-                    salt_millimolar: archive.settings.molarity * 1e3,
+                    ionic_millimolar: archive.settings.ionic_strength * 1e3,
                     detailed: self.detailed,
                     tune_steps: self.tune_steps,
                 });
@@ -718,9 +721,8 @@ fn msa_fields(ui: &mut egui::Ui, overrides: &mut MsaOverrides, derived: &HsyFlui
             "Debye length",
             &mut overrides.debye_length,
             derived.debye_length,
-            "Screening length κ⁻¹ of the Yukawa repulsion. Default: the scan's salt \
-             plus the protein counterions, as in the MPB-RMSA of Kaieda et al. 2014 \
-             (the MC table screens with salt only)",
+            "Screening length κ⁻¹ of the Yukawa repulsion. Default: from the scan's \
+             ionic strength, the same κ the MC table screens with",
         );
     });
 }

@@ -73,7 +73,7 @@ impl From<&ScanInputs> for ScanSettings {
             rmin: inputs.rmin,
             rmax: inputs.rmax,
             dr: inputs.dr,
-            molarity: inputs.molarity,
+            ionic_strength: inputs.molarity,
             temperature: inputs.temperature,
             max_ndiv: inputs.max_ndiv,
             gradient_threshold: inputs.gradient_threshold,
@@ -93,7 +93,7 @@ impl ScanInputs {
             rmin: s.rmin,
             rmax: s.rmax,
             dr: s.dr,
-            molarity: s.molarity,
+            molarity: s.ionic_strength,
             temperature: s.temperature,
             max_ndiv: s.max_ndiv,
             subdivision: s.subdivision,
@@ -168,7 +168,7 @@ mod tests {
     fn unknown_models_keep_the_current_choice_but_restore_settings() {
         let mut settings = ScanSettings::from(&ScanInputs::default());
         settings.model = "custom topology".into();
-        settings.molarity = 0.5;
+        settings.ionic_strength = 0.5;
         let restored = ScanInputs::from_settings(&settings, Model::KimHummer);
         assert_eq!(restored.model, Model::KimHummer);
         assert_eq!(restored.molarity, 0.5);

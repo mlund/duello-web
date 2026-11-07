@@ -41,10 +41,10 @@ fn stage_label(stage: Stage) -> &'static str {
 
 fn summary(ui: &mut egui::Ui, progress: Progress, info: RunInfo) {
     ui.label(format!(
-        "Run: N = {}, {:.2} mM protein, {:.0} mM salt. Stage: {}; sweep {} per copy; {} frames; U/N = {:.2} kT",
+        "Run: N = {}, {:.2} mM protein, {:.0} mM ionic strength. Stage: {}; sweep {} per copy; {} frames; U/N = {:.2} kT",
         info.n_bodies,
         info.millimolar,
-        info.salt_millimolar,
+        info.ionic_millimolar,
         stage_label(progress.stage),
         progress.sweep,
         progress.frames,
