@@ -5,7 +5,7 @@ use crate::files::download_bytes_as_file;
 use crate::files::save_file;
 use crate::inputs::{CgPolicy, Model, ScanInputs};
 use crate::structures::{StructureId, Structures};
-use duello::archive::StructureFile;
+use duello::archive::{Session, StructureFile};
 use duello::web_api::{PmfPoint, ScanProgress, ScanSettings};
 use duello::Subdivision;
 use egui_plot::{Line, MarkerShape, Plot, PlotPoint, Points};
@@ -57,8 +57,13 @@ pub struct TwobodyTab {
     inputs: ScanInputs,
     /// Molecules 1 and 2; the same entry twice is a homo-dimer.
     selected: [Option<StructureId>; 2],
-    /// Settings of a scan just imported, until the app hands them on.
-    imported: Option<ScanSettings>,
+    /// The pair the shown result was scanned from, for export; None when
+    /// unknown, e.g. imported from the CLI.
+    scanned: Option<[StructureId; 2]>,
+    /// Export was clicked; the app answers with `export_scan`.
+    export_requested: bool,
+    /// A scan just imported, until the app restores its session.
+    imported: Option<(ScanSettings, Session)>,
     status: ComputeStatus,
     result: Option<ComputeResult>,
     /// Cached plot data (computed once from result, reused each frame).
@@ -91,6 +96,8 @@ impl TwobodyTab {
         Self {
             inputs: ScanInputs::default(),
             selected: [None; 2],
+            scanned: None,
+            export_requested: false,
             imported: None,
             status: ComputeStatus::Idle,
             result: None,
@@ -121,10 +128,16 @@ impl TwobodyTab {
         }
     }
 
-    /// The solution a scan just imported was made in, once; the app gives
-    /// it to the conditions so every tab describes that scan.
-    pub fn take_import(&mut self) -> Option<ScanSettings> {
+    /// A scan just imported, once: its settings and saved session, for
+    /// the app to restore into every tab.
+    pub fn take_import(&mut self) -> Option<(ScanSettings, Session)> {
         self.imported.take()
+    }
+
+    /// Picks the restored pair, as the scan shown was made from it.
+    pub fn select_scanned(&mut self, pair: [StructureId; 2]) {
+        self.selected = pair.map(Some);
+        self.scanned = Some(pair);
     }
 
     pub fn ui(
@@ -231,17 +244,9 @@ impl TwobodyTab {
         ui.add_space(2.0);
 
         conditions.summary_ui(ui);
-        if let Some(result) = &self.result {
-            if !conditions.matches(&result.settings) {
-                ui.colored_label(egui::Color32::YELLOW, "Differs from the shown scan")
-                    .on_hover_text(format!(
-                        "The plotted scan was made at pH {:.2}, {:.3} M, {:.2} K; \
-                        run a new scan to use the conditions above",
-                        result.settings.ph,
-                        result.settings.ionic_strength,
-                        result.settings.temperature
-                    ));
-            }
+        if let Some(why) = (self.result.as_ref()).and_then(|r| conditions.stale(&r.settings)) {
+            ui.colored_label(egui::Color32::YELLOW, "Differs from the shown scan")
+                .on_hover_text(format!("{why}. Run a new scan to use the conditions above"));
         }
 
         ui.add_space(6.0);
@@ -561,14 +566,14 @@ impl TwobodyTab {
                 }
                 export = ui
                     .button("Export scan (.duello)")
-                    .on_hover_text("Table, CG bodies and results; re-import without rescanning")
+                    .on_hover_text(
+                        "Table, CG bodies and results, plus every tab's inputs \
+                        (structures, conditions, Manybody); import restores them",
+                    )
                     .clicked();
             });
-            // After the row: the closure holds `&self`, but exporting needs
-            // `&mut self` to report failures.
-            if export {
-                self.export_scan();
-            }
+            // The app owns every tab's inputs, so it builds the session.
+            self.export_requested |= export;
         }
     }
 
@@ -602,6 +607,7 @@ impl TwobodyTab {
             return;
         };
         let (mol1_data, mol2_data) = (mol1.contents.clone(), mol2.contents.clone());
+        self.scanned = self.selected[0].zip(self.selected[1]).map(<[_; 2]>::from);
 
         self.error = None;
         self.result = None;
@@ -713,10 +719,24 @@ impl TwobodyTab {
         }
     }
 
-    /// Native asks for the path first: serializing the table can take a while,
-    /// and is wasted if the dialog is cancelled.
-    fn export_scan(&mut self) {
-        let Some(result) = &self.result else { return };
+    /// Once per click of Export, for the app to build the session.
+    pub fn take_export_request(&mut self) -> bool {
+        std::mem::take(&mut self.export_requested)
+    }
+
+    /// The pair the shown result was scanned from, if known.
+    pub fn scanned(&self) -> Option<[StructureId; 2]> {
+        self.scanned
+    }
+
+    /// Writes the shown scan with `session`, every tab's inputs. Native
+    /// asks for the path first: serializing the table can take a while, and
+    /// is wasted if the dialog is cancelled.
+    pub fn export_scan(&mut self, session: Session) {
+        let Some(result) = &mut self.result else {
+            return;
+        };
+        result.session = session;
         const NAME: &str = "scan.duello";
         #[cfg(not(target_arch = "wasm32"))]
         let Some(path) = rfd::FileDialog::new().set_file_name(NAME).save_file() else {
@@ -776,14 +796,14 @@ impl TwobodyTab {
     }
 
     /// Replaces the shown result and inputs with the imported scan's; its
-    /// solution reaches the conditions via `take_import`.
+    /// solution and session reach the other tabs via `take_import`.
     fn import_scan(&mut self, bytes: &[u8]) {
         // A running scan streams into `plot_cache`; an import would mix into it.
         if !matches!(self.status, ComputeStatus::Idle) {
             self.error = Some("Import ignored: a scan is running".into());
             return;
         }
-        let result = match ComputeResult::from_bytes(bytes) {
+        let mut result = match ComputeResult::from_bytes(bytes) {
             Ok(result) => result,
             Err(e) => return self.error = Some(format!("Import failed: {e:#}")),
         };
@@ -793,7 +813,9 @@ impl TwobodyTab {
             .then(|| format!("Imported scan uses model '{model}', which the panel can't select"));
         self.error = warning.or_else(|| (!self.gpu_available).then(|| NO_GPU.to_string()));
         self.inputs = ScanInputs::from_settings(&result.settings, self.inputs.model);
-        self.imported = Some(result.settings.clone());
+        let session = std::mem::take(&mut result.session);
+        self.imported = Some((result.settings.clone(), session));
+        self.scanned = None;
         self.install_result(result);
     }
 

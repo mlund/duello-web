@@ -8,6 +8,7 @@ mod scene;
 mod stats;
 mod windows;
 
+use crate::conditions::SolutionConditions;
 use crate::widgets::grid;
 use duello::archive::{CgBody, ScanArchive};
 use duello::nbody::{
@@ -28,9 +29,10 @@ use web_time::Instant;
 /// responsive while the run makes progress.
 const FRAME_BUDGET_MS: f64 = 30.0;
 
+/// The protein concentration comes from the solution conditions, passed in
+/// as `molarity` (mol/L), so Onebody stays its only home.
 pub struct ManybodyTab {
     n_bodies: usize,
-    millimolar: f64,
     copies: usize,
     detailed: bool,
     /// Lattice q-vectors per |q| bin for the bead sums.
@@ -39,6 +41,9 @@ pub struct ManybodyTab {
     translation: f64,
     rotation: f64,
     tune_steps: bool,
+    /// Off by default: the trajectory fills browser memory and only the
+    /// download uses it.
+    record_trajectory: bool,
     msa: MsaOverrides,
     /// The scan `msa` was chosen for.
     msa_scan: Option<HsyFluid>,
@@ -87,6 +92,7 @@ struct RunInfo {
     ionic_millimolar: f64,
     detailed: bool,
     tune_steps: bool,
+    record_trajectory: bool,
 }
 
 impl Default for ManybodyTab {
@@ -94,13 +100,13 @@ impl Default for ManybodyTab {
         let defaults = RunSpec::new(1, 1.0);
         Self {
             n_bodies: 200,
-            millimolar: 5.0,
             copies: 4,
             detailed: false,
             vectors_per_bin: defaults.vectors_per_bin,
             translation: defaults.translation,
             rotation: defaults.rotation,
             tune_steps: true,
+            record_trajectory: false,
             msa: MsaOverrides::default(),
             msa_scan: None,
             msa_error: None,
@@ -144,10 +150,15 @@ impl ManybodyTab {
     }
 
     /// `archive` is the scan loaded in the Twobody tab, if any.
-    pub fn ui(&mut self, ui: &mut egui::Ui, archive: Option<&ScanArchive>) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        archive: Option<&ScanArchive>,
+        conditions: &SolutionConditions,
+    ) {
         egui::Panel::left("manybody_inputs")
             .min_size(220.0)
-            .show(ui, |ui| self.ui_inputs(ui, archive));
+            .show(ui, |ui| self.ui_inputs(ui, archive, conditions));
         egui::CentralPanel::default().show(ui, |ui| self.ui_windows(ui));
     }
 
@@ -244,7 +255,12 @@ impl ManybodyTab {
         egui::ScrollArea::vertical().show(ui, |ui| stats::show(ui, run, progress, info, error));
     }
 
-    fn ui_inputs(&mut self, ui: &mut egui::Ui, archive: Option<&ScanArchive>) {
+    fn ui_inputs(
+        &mut self,
+        ui: &mut egui::Ui,
+        archive: Option<&ScanArchive>,
+        conditions: &SolutionConditions,
+    ) {
         // Run controls and errors don't depend on the loaded scan, which
         // may have changed since the run started.
         self.ui_run_controls(ui);
@@ -255,20 +271,27 @@ impl ManybodyTab {
             ui.label("Run or import a scan of two identical molecules in the Twobody tab first.");
             return;
         };
+        let molarity = conditions.protein_molarity();
         let idle = !self.running && self.starting.is_none();
         let mut fits = true;
         ui.add_enabled_ui(idle, |ui| {
-            fits = self.ui_solution(ui, archive);
-            self.ui_scattering(ui);
+            fits = self.ui_solution(ui, archive, conditions);
+            self.ui_scattering(ui, molarity);
             section(ui, "Monte Carlo");
+            ui.checkbox(&mut self.record_trajectory, "Record trajectory")
+                .on_hover_text(
+                    "Keep every production frame (up to 256 MB in browser memory) for the \
+                     .traj download; `duello nbody-expand` turns it into a bead XTC. Off, \
+                     the curves are the same and memory stays small",
+                );
             egui::CollapsingHeader::new("Move settings")
                 .default_open(false)
-                .show(ui, |ui| self.ui_mc_inputs(ui))
+                .show(ui, |ui| self.ui_mc_inputs(ui, molarity))
                 .header_response
                 .on_hover_text("Copies and move steps; the defaults suit most runs");
         });
         // Theory only: editable while a run goes, which takes each change.
-        self.ui_msa(ui, archive);
+        self.ui_msa(ui, archive, molarity);
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
@@ -278,7 +301,7 @@ impl ManybodyTab {
             .on_disabled_hover_text("Needs a box larger than the table and no run in progress")
             .clicked()
         {
-            self.start(archive);
+            self.start(archive, molarity);
         }
         self.ui_start_status(ui);
     }
@@ -310,35 +333,44 @@ impl ManybodyTab {
         }
     }
 
-    /// N, concentration and what follows from them; false if the box is
-    /// too small for the table.
-    fn ui_solution(&mut self, ui: &mut egui::Ui, archive: &ScanArchive) -> bool {
+    /// N, the conditions' concentration and what follows from them; false
+    /// if the box is too small for the table.
+    fn ui_solution(
+        &mut self,
+        ui: &mut egui::Ui,
+        archive: &ScanArchive,
+        conditions: &SolutionConditions,
+    ) -> bool {
+        let molarity = conditions.protein_molarity();
         section(ui, "Solution");
         grid("manybody_solution").show(ui, |ui| {
             ui.label("Molecules, N");
             ui.add(egui::DragValue::new(&mut self.n_bodies).range(2..=2000))
                 .on_hover_text("Molecules in the periodic box; more lowers q_min");
             ui.end_row();
-            ui.label("Concentration");
-            ui.add(
-                egui::DragValue::new(&mut self.millimolar)
-                    .range(0.01..=200.0)
-                    .speed(0.1)
-                    .suffix(" mM"),
-            )
-            .on_hover_text("Protein molarity; with N it sets the box size");
+            let tip = "Protein molarity; with N it sets the box size. Set in Onebody.";
+            ui.label("Concentration").on_hover_text(tip);
+            ui.label(format!("{:.2} mM", conditions.protein_millimolar))
+                .on_hover_text(tip);
             ui.end_row();
         });
-        let l = self.box_length();
+        let l = self.box_length(molarity);
         ui.label(format!("Box L = {l:.0} Å"))
             .on_hover_text("Cubic box holding N molecules at this concentration");
         // The κ the reference sphere uses, at the scan's temperature.
-        let debye = HsyFluid::for_scan(archive, self.millimolar * 1e-3).debye_length;
+        let debye = HsyFluid::for_scan(archive, molarity).debye_length;
         ui.label(format!(
             "Ionic strength {:.0} mM, Debye length ≈ {debye:.0} Å",
             archive.settings.ionic_strength * 1e3
         ))
         .on_hover_text("Set by the Twobody scan, whose table holds the screened energies");
+        if let Some(why) = conditions.stale(&archive.settings) {
+            ui.colored_label(egui::Color32::YELLOW, "Scan predates the conditions")
+                .on_hover_text(format!(
+                    "{why}. The run uses the scan's table and ionic strength; re-scan in \
+                     Twobody to use the current conditions"
+                ));
+        }
         let needed = 2.0 * archive.table.rmax;
         let fits = l >= needed;
         if !fits {
@@ -350,7 +382,7 @@ impl ManybodyTab {
         fits
     }
 
-    fn ui_scattering(&mut self, ui: &mut egui::Ui) {
+    fn ui_scattering(&mut self, ui: &mut egui::Ui, molarity: f64) {
         section(ui, "Scattering");
         let defaults = RunSpec::new(1, 1.0);
         grid("manybody_scattering").show(ui, |ui| {
@@ -375,13 +407,13 @@ impl ManybodyTab {
             .on_disabled_hover_text("Only used with Detailed I(q)");
             ui.end_row();
         });
-        let l = self.box_length();
+        let l = self.box_length(molarity);
         ui.label(format!("q_min = {:.4} Å⁻¹", std::f64::consts::TAU / l))
             .on_hover_text("2π/L: the lowest q the periodic box can resolve");
     }
 
     /// Defaults suit most runs, hence collapsed.
-    fn ui_mc_inputs(&mut self, ui: &mut egui::Ui) {
+    fn ui_mc_inputs(&mut self, ui: &mut egui::Ui, molarity: f64) {
         grid("manybody_mc").show(ui, |ui| {
             ui.label("Independent copies");
             ui.add(egui::DragValue::new(&mut self.copies).range(1..=16))
@@ -396,7 +428,7 @@ impl ManybodyTab {
             let start = if self.tune_steps { " (start)" } else { "" };
             ui.label(format!("Translation step{start}"));
             // Steps beyond L/2 add nothing (and are clamped).
-            let half_box = self.box_length() / 2.0;
+            let half_box = self.box_length(molarity) / 2.0;
             ui.add(
                 egui::DragValue::new(&mut self.translation)
                     .range(0.01..=half_box)
@@ -419,11 +451,11 @@ impl ManybodyTab {
 
     /// A live (running or paused) run shows and takes edits to its own
     /// sphere; otherwise the section previews the next run from the inputs.
-    fn ui_msa(&mut self, ui: &mut egui::Ui, archive: &ScanArchive) {
+    fn ui_msa(&mut self, ui: &mut egui::Ui, archive: &ScanArchive, molarity: f64) {
         section(ui, "MSA reference");
         let (derived, before) = match self.live_run().map(NBodyRun::msa) {
             Some(msa) => (msa.derived().clone(), msa.overrides()),
-            None => (self.next_run_sphere(archive), self.msa),
+            None => (self.next_run_sphere(archive, molarity), self.msa),
         };
         let mut overrides = before;
         msa_fields(ui, &mut overrides, &derived);
@@ -434,7 +466,7 @@ impl ManybodyTab {
             Some(msa) => (msa.sphere().clone(), msa.solved()),
             None => {
                 let sphere = derived.overridden(&self.msa);
-                let q_min = std::f64::consts::TAU / self.box_length();
+                let q_min = std::f64::consts::TAU / self.box_length(molarity);
                 (sphere.clone(), self.msa_solvable(sphere, q_min))
             }
         };
@@ -466,13 +498,13 @@ impl ManybodyTab {
     /// Overrides chosen for one molecule or solution mean nothing for
     /// another scan, so a new scan clears them; the 1 M sphere tags the scan
     /// without the concentration.
-    fn next_run_sphere(&mut self, archive: &ScanArchive) -> HsyFluid {
+    fn next_run_sphere(&mut self, archive: &ScanArchive, molarity: f64) -> HsyFluid {
         let scan = HsyFluid::for_scan(archive, 1.0);
         if self.msa_scan.as_ref() != Some(&scan) {
             self.msa = MsaOverrides::default();
             self.msa_scan = Some(scan);
         }
-        HsyFluid::for_scan(archive, self.millimolar * 1e-3)
+        HsyFluid::for_scan(archive, molarity)
     }
 
     /// A live run takes the change or refuses it, keeping its reference; the
@@ -502,12 +534,13 @@ impl ManybodyTab {
         }
     }
 
-    fn box_length(&self) -> f64 {
-        box_length(self.n_bodies, self.millimolar * 1e-3)
+    fn box_length(&self, molarity: f64) -> f64 {
+        box_length(self.n_bodies, molarity)
     }
 
-    fn spec(&self) -> RunSpec {
-        let mut spec = RunSpec::new(self.n_bodies, self.millimolar * 1e-3);
+    /// The run the inputs describe, at protein `molarity` (mol/L).
+    pub fn spec(&self, molarity: f64) -> RunSpec {
+        let mut spec = RunSpec::new(self.n_bodies, molarity);
         spec.copies = self.copies;
         spec.centres_only = !self.detailed;
         spec.vectors_per_bin = self.vectors_per_bin;
@@ -515,8 +548,7 @@ impl ManybodyTab {
         spec.rotation = self.rotation;
         spec.tune_steps = self.tune_steps;
         spec.msa = self.msa;
-        // Until the tab offers a toggle, keep the download it always had.
-        spec.record_trajectory = true;
+        spec.record_trajectory = self.record_trajectory;
         if !self.detailed {
             // Mass-centre frames cost little next to the sweeps between them.
             spec.sweeps_per_frame = spec.sweeps_per_check;
@@ -524,14 +556,29 @@ impl ManybodyTab {
         spec
     }
 
+    /// Inverse of `spec`, for a restored session. The concentration is the
+    /// conditions'; the MSA overrides belong to `scan`, the imported one.
+    pub fn restore(&mut self, spec: &RunSpec, scan: Option<&ScanArchive>) {
+        self.n_bodies = spec.n_bodies;
+        self.copies = spec.copies;
+        self.detailed = !spec.centres_only;
+        self.vectors_per_bin = spec.vectors_per_bin;
+        self.translation = spec.translation;
+        self.rotation = spec.rotation;
+        self.tune_steps = spec.tune_steps;
+        self.record_trajectory = spec.record_trajectory;
+        self.msa = spec.msa;
+        self.msa_scan = scan.map(|archive| HsyFluid::for_scan(archive, 1.0));
+    }
+
     /// Detailed runs set up GPU bead sums first; `poll_start` launches them.
-    fn start(&mut self, archive: &ScanArchive) {
-        let mut spec = self.spec();
+    fn start(&mut self, archive: &ScanArchive, molarity: f64) {
+        let mut spec = self.spec(molarity);
         self.gpu_note = None;
         self.error = None;
         if !self.detailed {
             let run = NBodyRun::start(archive, spec, RESIDUE_FORM_FACTORS);
-            return self.launch(archive, run);
+            return self.launch(archive, run, molarity);
         }
         spec.device = Device::Gpu;
         let setup = NBodyRun::scattering(archive, &spec, RESIDUE_FORM_FACTORS);
@@ -562,6 +609,7 @@ impl ManybodyTab {
             reference,
             ..
         } = starting;
+        let molarity = spec.molarity;
         let Some(archive) = archive.filter(|a| a.bodies[0] == reference) else {
             self.error = Some("the scan changed during GPU setup; press Run again".into());
             return;
@@ -575,20 +623,21 @@ impl ManybodyTab {
                 run
             }
         };
-        self.launch(archive, run);
+        self.launch(archive, run, molarity);
     }
 
-    fn launch(&mut self, archive: &ScanArchive, run: anyhow::Result<NBodyRun>) {
+    fn launch(&mut self, archive: &ScanArchive, run: anyhow::Result<NBodyRun>, molarity: f64) {
         match run {
             Ok(run) => {
                 self.run = Some(run);
                 self.run_info = Some(RunInfo {
                     n_bodies: self.n_bodies,
                     copies: self.copies,
-                    millimolar: self.millimolar,
+                    millimolar: molarity * 1e3,
                     ionic_millimolar: archive.settings.ionic_strength * 1e3,
                     detailed: self.detailed,
                     tune_steps: self.tune_steps,
+                    record_trajectory: self.record_trajectory,
                 });
                 self.running = true;
                 self.unsettled = false;
@@ -804,4 +853,35 @@ fn spawn<T: 'static>(future: impl Future<Output = T> + 'static) -> mpsc::Receive
     #[cfg(not(target_arch = "wasm32"))]
     let _ = tx.send(pollster::block_on(future));
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A saved session's inputs must come back as the same run.
+    #[test]
+    fn restored_inputs_give_back_their_spec() {
+        let mut detailed = RunSpec::new(300, 0.004);
+        detailed.copies = 6;
+        detailed.centres_only = false;
+        detailed.vectors_per_bin = 32;
+        detailed.translation = 2.0;
+        detailed.rotation = 0.3;
+        detailed.tune_steps = false;
+        detailed.msa.diameter = Some(30.0);
+        detailed.record_trajectory = true;
+        // Mass-centre runs take a frame at every check.
+        let centres = RunSpec {
+            centres_only: true,
+            sweeps_per_frame: 10,
+            record_trajectory: false,
+            ..detailed.clone()
+        };
+        for spec in [detailed, centres] {
+            let mut tab = ManybodyTab::default();
+            tab.restore(&spec, None);
+            assert_eq!(tab.spec(0.004), spec);
+        }
+    }
 }

@@ -128,6 +128,14 @@ mod tests {
     use super::*;
     use crate::conditions::SolutionConditions;
 
+    fn conditions() -> SolutionConditions {
+        let mut conditions = SolutionConditions::default();
+        conditions.temperature = 310.0;
+        conditions.ph = 4.5;
+        conditions.ionic_strength = 0.02;
+        conditions
+    }
+
     #[test]
     fn model_names_from_archives_map_back_to_ui_models() {
         assert_eq!(Model::from_name("kimhummer"), Some(Model::KimHummer));
@@ -138,11 +146,7 @@ mod tests {
     /// Onebody owns the solution, so the scan takes it from there.
     #[test]
     fn settings_take_the_solution_from_the_conditions() {
-        let conditions = SolutionConditions {
-            temperature: 310.0,
-            ph: 4.5,
-            ionic_strength: 0.02,
-        };
+        let conditions = conditions();
         let settings = ScanInputs::default().settings(&conditions);
         assert_eq!(
             (settings.temperature, settings.ph, settings.ionic_strength),
@@ -162,11 +166,7 @@ mod tests {
             subdivision: Subdivision::Lattice,
             ..Default::default()
         };
-        let conditions = SolutionConditions {
-            temperature: 310.0,
-            ph: 4.5,
-            ionic_strength: 0.02,
-        };
+        let conditions = conditions();
         let settings = inputs.settings(&conditions);
         let restored = ScanInputs::from_settings(&settings, Model::Calvados3);
         assert_eq!(

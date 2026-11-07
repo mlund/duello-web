@@ -54,6 +54,29 @@ impl Structures {
         self.entries.iter().map(|(id, f)| (*id, f.name.as_str()))
     }
 
+    /// Position in load order, as a saved session indexes structures.
+    pub fn index_of(&self, id: StructureId) -> Option<usize> {
+        self.entries.iter().position(|(i, _)| *i == id)
+    }
+
+    /// Copies, in load order, for a saved session.
+    pub fn files(&self) -> Vec<StructureFile> {
+        self.entries.iter().map(|(_, f)| f.clone()).collect()
+    }
+
+    /// Replaces the list with a saved session's, returning the new ids in
+    /// the same order.
+    pub fn replace(&mut self, files: Vec<StructureFile>) -> Vec<StructureId> {
+        self.entries.clear();
+        files
+            .into_iter()
+            .map(|file| {
+                self.push(file);
+                self.entries.last().unwrap().0
+            })
+            .collect()
+    }
+
     pub fn first(&self) -> Option<StructureId> {
         self.entries.first().map(|(id, _)| *id)
     }

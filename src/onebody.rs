@@ -1,5 +1,6 @@
 use crate::conditions::SolutionConditions;
 use crate::structures::Structures;
+use duello::archive::CgBody;
 
 /// Home of the inputs every tab shares: structures and solution conditions.
 /// The central area is kept for purrette's single-molecule analysis.
@@ -11,6 +12,7 @@ impl OnebodyTab {
         ui: &mut egui::Ui,
         structures: &mut Structures,
         conditions: &mut SolutionConditions,
+        scanned_body: Option<&CgBody>,
     ) {
         egui::Panel::left("onebody_inputs")
             .min_size(220.0)
@@ -26,6 +28,15 @@ impl OnebodyTab {
                         .on_hover_text("Shared by every tab");
                     ui.add_space(2.0);
                     conditions.ui(ui);
+                    ui.add_space(4.0);
+                    egui::CollapsingHeader::new("Free-salt estimate")
+                        .default_open(false)
+                        .show(ui, |ui| conditions.estimator_ui(ui, scanned_body))
+                        .header_response
+                        .on_hover_text(
+                            "Ionic strength from Donnan equilibrium with a salt reservoir, \
+                            for net-charged, crowded proteins",
+                        );
                 });
             });
         egui::CentralPanel::default().show(ui, |ui| {

@@ -15,13 +15,13 @@ pub fn show(
 ) {
     summary(ui, progress, info);
     sampling(ui, run, progress, info);
-    if !progress.recording {
+    if info.record_trajectory && !progress.recording {
         ui.colored_label(
             egui::Color32::YELLOW,
             "Trajectory reached its size cap; recording stopped",
         );
     }
-    match downloads(ui, run, progress) {
+    match downloads(ui, run, progress, info) {
         Some(Err(e)) => *error = Some(format!("Save failed: {e:#}")),
         Some(Ok(())) => *error = None,
         None => {}
@@ -90,14 +90,20 @@ enum Download {
 }
 
 /// `Some` when a download was asked for: whether saving it worked.
-fn downloads(ui: &mut egui::Ui, run: &NBodyRun, progress: Progress) -> Option<anyhow::Result<()>> {
+fn downloads(
+    ui: &mut egui::Ui,
+    run: &NBodyRun,
+    progress: Progress,
+    info: RunInfo,
+) -> Option<anyhow::Result<()>> {
+    const NO_FRAMES: &str = "Available once production frames exist";
     let mut pick = None;
     ui.horizontal(|ui| {
-        let mut button = |enabled: bool, label: &str, hover: &str, kind: Download| {
+        let mut button = |enabled: bool, label: &str, hover: &str, why_not: &str, kind| {
             let clicked = ui
                 .add_enabled(enabled, egui::Button::new(label))
                 .on_hover_text(hover)
-                .on_disabled_hover_text("Available once production frames exist")
+                .on_disabled_hover_text(why_not)
                 .clicked();
             if clicked {
                 pick = Some(kind);
@@ -107,18 +113,21 @@ fn downloads(ui: &mut egui::Ui, run: &NBodyRun, progress: Progress) -> Option<an
             true,
             "Curve (.csv)",
             "Scattering curves and run statistics",
+            NO_FRAMES,
             Download::Curve,
         );
         button(
             progress.frames > 0,
             "g(r) (.csv)",
             "Mass-centre radial distribution; error bars need two or more copies",
+            NO_FRAMES,
             Download::PairCorrelation,
         );
         button(
-            true,
+            info.record_trajectory,
             "Trajectory (.traj)",
             "Production frames: positions and orientations",
+            "Recording was off for this run: tick Record trajectory and run again",
             Download::Trajectory,
         );
     });
