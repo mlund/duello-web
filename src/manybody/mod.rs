@@ -284,9 +284,8 @@ impl ManybodyTab {
         let idle = !self.running && self.starting.is_none();
         let mut fits = true;
         ui.add_enabled_ui(idle, |ui| {
-            fits = self.ui_solution(ui, archive, conditions);
-            self.ui_scattering(ui, molarity);
             section(ui, "Monte Carlo");
+            fits = self.ui_box(ui, archive, conditions);
             ui.checkbox(&mut self.record_trajectory, "Record trajectory")
                 .on_hover_text(
                     "Keep every production frame (up to 256 MB in browser memory) for the \
@@ -298,6 +297,7 @@ impl ManybodyTab {
                 .show(ui, |ui| self.ui_mc_inputs(ui, molarity))
                 .header_response
                 .on_hover_text("Copies and move steps; the defaults suit most runs");
+            self.ui_scattering(ui, molarity);
         });
         // Theory only: editable while a run goes, which takes each change.
         self.ui_msa(ui, archive, molarity);
@@ -342,37 +342,27 @@ impl ManybodyTab {
         }
     }
 
-    /// N, the conditions' concentration and what follows from them; false
-    /// if the box is too small for the table.
-    fn ui_solution(
+    /// N and the box it makes at Onebody's concentration; false if the box
+    /// is too small for the table.
+    fn ui_box(
         &mut self,
         ui: &mut egui::Ui,
         archive: &ScanArchive,
         conditions: &SolutionConditions,
     ) -> bool {
         let molarity = conditions.protein_molarity();
-        section(ui, "Solution");
-        grid("manybody_solution").show(ui, |ui| {
+        grid("manybody_box").show(ui, |ui| {
             ui.label("Molecules, N");
             ui.add(egui::DragValue::new(&mut self.n_bodies).range(2..=2000))
                 .on_hover_text("Molecules in the periodic box; more lowers q_min");
             ui.end_row();
-            let tip = set_in_onebody("Protein molarity; with N it sets the box size");
-            ui.label("Concentration").on_hover_text(&tip);
-            ui.label(format!("{:.2} mM", conditions.protein_millimolar))
-                .on_hover_text(tip);
-            ui.end_row();
         });
         let l = self.box_length(molarity);
         ui.label(format!("Box L = {l:.0} Å"))
-            .on_hover_text("Cubic box holding N molecules at this concentration");
-        // The κ the reference sphere uses, at the scan's temperature.
-        let debye = HsyFluid::for_scan(archive, molarity).debye_length;
-        ui.label(format!(
-            "Ionic strength {:.0} mM, Debye length ≈ {debye:.0} Å",
-            archive.settings.ionic_strength * 1e3
-        ))
-        .on_hover_text("Set by the Twobody scan, whose table holds the screened energies");
+            .on_hover_text(set_in_onebody(&format!(
+                "Cubic box holding N molecules at {:.2} mM",
+                conditions.protein_millimolar
+            )));
         if let Some(why) = conditions.stale(&archive.settings) {
             ui.colored_label(egui::Color32::YELLOW, "Scan predates the conditions")
                 .on_hover_text(format!(

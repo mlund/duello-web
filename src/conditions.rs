@@ -1,6 +1,6 @@
 //! The solution every tab works in; set in Onebody, read elsewhere.
 
-use crate::widgets::{grid, row, set_in_onebody};
+use crate::widgets::{grid, row};
 use duello::archive::{CgBody, FreeSaltEstimate, Session};
 use duello::nbody::HsyFluid;
 use duello::solution::{free_salt, protein_volume, FreeSalt};
@@ -227,22 +227,6 @@ impl SolutionConditions {
                 }
             })
             .inner
-    }
-
-    /// Read-only, for tabs that use the conditions but don't own them.
-    pub fn summary_ui(&self, ui: &mut egui::Ui) {
-        let shown = set_in_onebody;
-        grid("conditions_summary").show(ui, |ui| {
-            row(ui, "pH", &shown(PH_TIP), |ui| {
-                ui.label(format!("{:.2}", self.ph))
-            });
-            row(ui, "Ionic strength", &shown(IONIC_STRENGTH_TIP), |ui| {
-                ui.label(format!("{:.3} M", self.ionic_strength))
-            });
-            row(ui, "Temperature", &shown(TEMPERATURE_TIP), |ui| {
-                ui.label(format!("{:.2} K", self.temperature))
-            });
-        });
     }
 }
 

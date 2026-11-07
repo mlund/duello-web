@@ -80,7 +80,7 @@ pub struct Look {
 impl Default for Look {
     fn default() -> Self {
         Self {
-            show: Show::Beads,
+            show: Show::Surface(Field::Potential),
             colouring: Colouring::Charge,
             dipole: false,
         }

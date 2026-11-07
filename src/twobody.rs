@@ -20,6 +20,9 @@ use std::sync::Arc;
 const NO_GPU: &str =
     "No GPU/WebGPU adapter found. A WebGPU-capable browser is required (Chrome 113+, Edge 113+).";
 
+/// Typical protein separations; typed values may go past either end.
+const R_SLIDER: std::ops::RangeInclusive<f64> = 0.0..=150.0;
+
 fn subdivision_label(scheme: Subdivision) -> &'static str {
     match scheme {
         Subdivision::Geodesic => "Geodesic",
@@ -193,25 +196,14 @@ impl TwobodyTab {
         ui.add_space(2.0);
         self.ui_molecules(ui, structures);
 
-        section(ui);
-
-        // --- Force field ---
-        ui.strong("Force field");
-        ui.add_space(2.0);
-        forcefield.summary_ui(ui);
-        if let Some(why) = (self.result.as_ref()).and_then(|r| forcefield.stale(&r.settings)) {
-            differs_from_scan(ui, &why, "force field");
-        }
-
-        section(ui);
-
-        // --- Solution ---
-        ui.strong("Solution");
-        ui.add_space(2.0);
-
-        conditions.summary_ui(ui);
-        if let Some(why) = (self.result.as_ref()).and_then(|r| conditions.stale(&r.settings)) {
-            differs_from_scan(ui, &why, "conditions");
+        // Force field and conditions are set in Onebody; only a mismatch shows here.
+        if let Some(settings) = self.result.as_ref().map(|r| &r.settings) {
+            if let Some(why) = forcefield.stale(settings) {
+                differs_from_scan(ui, &why, "force field");
+            }
+            if let Some(why) = conditions.stale(settings) {
+                differs_from_scan(ui, &why, "conditions");
+            }
         }
 
         section(ui);
@@ -224,28 +216,20 @@ impl TwobodyTab {
             .num_columns(2)
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
-                ui.label("R min");
+                ui.label("R");
                 ui.add(
-                    egui::DragValue::new(&mut self.inputs.rmin)
-                        .speed(0.5)
+                    egui::RangeSlider::new(&mut self.inputs.rmin, &mut self.inputs.rmax, R_SLIDER)
+                        .min_separation(1.0)
+                        .clamping(egui::SliderClamping::Never)
                         .suffix(" \u{00C5}"),
                 )
                 .on_hover_text(
-                    "Minimum sampled center of mass separation between the proteins. \
-                    Below this value we assume infinite repulsion in the osmotic second \
-                    virial coefficient, B\u{2082}. Directly affects the reduced virial \
-                    coefficient so pay attention when comparing with experiment or other models.",
-                );
-                ui.end_row();
-
-                ui.label("R max");
-                ui.add(
-                    egui::DragValue::new(&mut self.inputs.rmax)
-                        .speed(0.5)
-                        .suffix(" \u{00C5}"),
-                )
-                .on_hover_text(
-                    "Largest sampled mass-centre separation; beyond it the tail is fitted",
+                    "Sampled mass-centre separations. Below the lower end we assume \
+                    infinite repulsion in the osmotic second virial coefficient, \
+                    B\u{2082}, which directly affects the reduced virial coefficient, so \
+                    pay attention when comparing with experiment or other models. \
+                    Beyond the upper end the tail is fitted. Type a value to go past \
+                    the slider's ends.",
                 );
                 ui.end_row();
 
@@ -262,7 +246,7 @@ impl TwobodyTab {
 
         ui.add_space(4.0);
 
-        self.ui_angular_mesh(ui);
+        self.ui_angular_resolution(ui);
 
         ui.add_space(6.0);
 
@@ -274,6 +258,9 @@ impl TwobodyTab {
                     .num_columns(2)
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
+                        self.ui_angular_mesh(ui);
+                        ui.end_row();
+
                         ui.label("Cutoff");
                         ui.add(
                             egui::DragValue::new(&mut self.inputs.cutoff)
@@ -355,28 +342,30 @@ impl TwobodyTab {
         });
     }
 
-    /// Scheme and finest level of the orientation mesh.
+    /// How the orientation mesh subdivides; two grid cells.
     fn ui_angular_mesh(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Angular mesh");
-            egui::ComboBox::from_id_salt("subdivision_combo")
-                .selected_text(subdivision_label(self.inputs.subdivision))
-                .show_ui(ui, |ui| {
-                    for scheme in [Subdivision::Geodesic, Subdivision::Lattice] {
-                        ui.selectable_value(
-                            &mut self.inputs.subdivision,
-                            scheme,
-                            subdivision_label(scheme),
-                        );
-                    }
-                })
-                .response
-                .on_hover_text(
-                    "How each icosahedron face is subdivided. Geodesic: near-uniform \
+        ui.label("Angular mesh");
+        egui::ComboBox::from_id_salt("subdivision_combo")
+            .selected_text(subdivision_label(self.inputs.subdivision))
+            .show_ui(ui, |ui| {
+                for scheme in [Subdivision::Geodesic, Subdivision::Lattice] {
+                    ui.selectable_value(
+                        &mut self.inputs.subdivision,
+                        scheme,
+                        subdivision_label(scheme),
+                    );
+                }
+            })
+            .response
+            .on_hover_text(
+                "How each icosahedron face is subdivided. Geodesic: near-uniform \
                     vertices, found by search. Lattice: a regular grid per face, found in \
                     closed form (faster lookups).",
-                );
-        });
+            );
+    }
+
+    /// The orientation mesh's finest level.
+    fn ui_angular_resolution(&mut self, ui: &mut egui::Ui) {
         ui.label("Angular resolution");
         let vertices = self.inputs.subdivision.n_vertices(self.inputs.max_ndiv);
         ui.add(egui::Slider::new(&mut self.inputs.max_ndiv, 0..=4))

@@ -1,7 +1,7 @@
 //! Model and coarse-graining policy, set in Onebody: they decide titration, bead
 //! properties and the pair energy, so every tab must see the same choice.
 
-use crate::widgets::{grid, pick, row, set_in_onebody};
+use crate::widgets::{grid, pick, row};
 use duello::web_api::ScanSettings;
 
 const MODEL_TIP: &str =
@@ -155,19 +155,6 @@ impl ForceField {
                     |cg| cg.label(),
                     None,
                 )
-            });
-        });
-    }
-
-    /// Read-only, for tabs that use but don't own the choice.
-    pub fn summary_ui(&self, ui: &mut egui::Ui) {
-        let shown = set_in_onebody;
-        grid("forcefield_summary").show(ui, |ui| {
-            row(ui, "Model", &shown(MODEL_TIP), |ui| {
-                ui.label(self.model.label())
-            });
-            row(ui, "CG policy", &shown(CG_TIP), |ui| {
-                ui.label(self.cg.label())
             });
         });
     }
