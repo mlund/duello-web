@@ -12,7 +12,9 @@ use duello::archive::CgBody;
 mod analysis;
 mod panes;
 mod scene;
+mod surface;
 mod table;
+mod view3d;
 
 #[derive(Default)]
 pub struct OnebodyTab {
@@ -126,7 +128,7 @@ impl windows::Pane for Pane {
             Pane::Titration => {
                 "Charge, dipole, quadrupole or capacitance over pH: Monte Carlo and ideal"
             }
-            Pane::Viewer => "3D view of the coarse-grained beads",
+            Pane::Viewer => "3D view: beads, or the surface potential; and the dipole",
             Pane::Atoms => "Every bead with its charge and force-field parameters",
         }
     }
@@ -144,7 +146,32 @@ impl windows::Pane for Pane {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    /// Lys–Asp–Ala, a few heavy atoms each, 3.8 Å apart.
+    pub fn tripeptide() -> Vec<u8> {
+        let residues: [(&str, &[&str]); 3] = [
+            ("LYS", &["N", "CA", "C", "O", "CB", "NZ"]),
+            ("ASP", &["N", "CA", "C", "O", "CB", "CG", "OD1", "OD2"]),
+            ("ALA", &["N", "CA", "C", "O", "CB", "OXT"]),
+        ];
+        let mut pdb = String::new();
+        let mut serial = 1;
+        for (seq, (name, atoms)) in residues.iter().enumerate() {
+            for (k, atom) in atoms.iter().enumerate() {
+                let (x, y) = (3.8 * seq as f64, 0.5 * k as f64);
+                let element = &atom[..1];
+                pdb += &format!(
+                    "ATOM  {serial:5} {atom:<4} {name} A{:4}    {x:8.3}{y:8.3}{:8.3}  1.00  0.00          {element:>2}\n",
+                    seq + 1,
+                    0.0
+                );
+                serial += 1;
+            }
+        }
+        pdb += "END\n";
+        pdb.into_bytes()
+    }
+
     #[test]
     fn panes_tile_the_canvas() {
         crate::windows::assert_tiled(&super::Pane::ALL);

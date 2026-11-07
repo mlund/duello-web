@@ -12,6 +12,7 @@ pub fn scene(frame: &Frame, body: &CgBody) -> Scene {
         spheres: beads(frame, body),
         cylinders: box_edges(l),
         bounds: ([0.5 * l; 3], 3f32.sqrt() * 0.5 * l),
+        ..Default::default()
     }
 }
 

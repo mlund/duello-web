@@ -3,14 +3,13 @@
 //! frame and starts over when anything it depends on changes.
 
 use super::panes::{self, Quantity};
-use super::scene::{self, Colouring};
 use super::table::BeadTable;
+use super::view3d::MoleculeScene;
 use super::Pane;
 use crate::budget::{self, Instant};
 use crate::conditions::SolutionConditions;
 use crate::forcefield::ForceField;
 use crate::structures::StructureId;
-use crate::viewer::Viewer;
 use duello::archive::{CgBody, StructureFile};
 use duello::molecule::{Curve, Molecule, MoleculeSpec, Step, Titrating};
 use duello::system::TITRATION_SWEEPS;
@@ -62,8 +61,9 @@ impl Key {
 pub struct MoleculeView {
     key: Option<Key>,
     titrating: Option<Titrating>,
-    /// Last finished titration of this molecule, shown while conditions re-titrate.
-    shown: Option<Box<Molecule>>,
+    /// Last finished titration of this molecule and what it was titrated
+    /// under, shown while conditions re-titrate.
+    shown: Option<(Key, Box<Molecule>)>,
     /// Counts molecules shown, naming them for the viewer and tables.
     generation: u64,
     error: Option<String>,
@@ -74,8 +74,7 @@ pub struct MoleculeView {
     sweeps_per_frame: u64,
     /// Contents hash of the last structure seen; an id's contents never change.
     hashed: Option<(StructureId, u64)>,
-    viewer: Viewer,
-    colouring: Colouring,
+    scene: MoleculeScene,
     atoms: BeadTable,
 }
 
@@ -91,8 +90,7 @@ impl Default for MoleculeView {
             quantity: Quantity::Charge,
             sweeps_per_frame: FIRST_SWEEPS,
             hashed: None,
-            viewer: Viewer::default(),
-            colouring: Colouring::Charge,
+            scene: MoleculeScene::default(),
             atoms: BeadTable::default(),
         }
     }
@@ -139,12 +137,12 @@ impl MoleculeView {
 
     /// The titrated body; while conditions re-titrate, the last one.
     pub fn body(&self) -> Option<&CgBody> {
-        self.shown.as_ref().map(|m| &m.body)
+        self.shown.as_ref().map(|(_, m)| &m.body)
     }
 
     pub fn ui_pane(&mut self, ui: &mut egui::Ui, pane: Pane) {
         // While re-titrating, progress shows once, in the side panel.
-        let (Some(molecule), Some(key)) = (&self.shown, self.key) else {
+        let (Some((titrated, molecule)), Some(key)) = (&self.shown, self.key) else {
             return self.status_ui(ui);
         };
         let generation = self.generation;
@@ -157,12 +155,10 @@ impl MoleculeView {
                     .map_or((&[][..], &[][..]), |(_, c)| (c.ideal(), c.points()));
                 panes::titration(ui, &mut self.quantity, ideal, mc, key.ph);
             }
+            // Screened as titrated, so charges and screening agree.
             Pane::Viewer => {
-                colouring_picker(ui, &mut self.colouring);
-                let colouring = self.colouring;
-                self.viewer.ui(ui, (generation, colouring), || {
-                    scene::scene(&molecule.body, colouring)
-                });
+                let (t, i) = (titrated.temperature, titrated.ionic_strength);
+                self.scene.ui(ui, molecule, generation, t, i);
             }
             Pane::Atoms => self.atoms.ui(ui, &molecule.beads, generation),
         }
@@ -217,6 +213,7 @@ impl MoleculeView {
     fn restart(&mut self, key: Key, pdb: &[u8]) {
         if !self.key.is_some_and(|old| old.same_molecule(key)) {
             self.shown = None;
+            self.scene.reset_camera();
         }
         self.key = Some(key);
         self.sweeps_per_frame = FIRST_SWEEPS;
@@ -263,7 +260,8 @@ impl MoleculeView {
             match titrating.advance(sweeps) {
                 Ok(Step::Running(titrating)) => self.titrating = Some(titrating),
                 Ok(Step::Done(molecule)) => {
-                    self.shown = Some(molecule);
+                    let key = self.key.expect("titrations start with a key");
+                    self.shown = Some((key, molecule));
                     self.generation += 1;
                 }
                 Err(e) => self.error = Some(format!("{e:#}")),
@@ -277,49 +275,10 @@ impl MoleculeView {
     }
 }
 
-fn colouring_picker(ui: &mut egui::Ui, colouring: &mut Colouring) {
-    ui.horizontal(|ui| {
-        let tip = |c: Colouring| match c {
-            Colouring::Charge => "Red negative, grey neutral, blue positive; full at ±1 e",
-            Colouring::Kind => "One colour per atom kind",
-        };
-        ui.label("Colour")
-            .on_hover_text("What the bead colours show");
-        for c in Colouring::ALL {
-            ui.selectable_value(colouring, c, c.label())
-                .on_hover_text(tip(c));
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Lys–Asp–Ala, a few heavy atoms each, 3.8 Å apart.
-    fn tripeptide() -> Vec<u8> {
-        let residues: [(&str, &[&str]); 3] = [
-            ("LYS", &["N", "CA", "C", "O", "CB", "NZ"]),
-            ("ASP", &["N", "CA", "C", "O", "CB", "CG", "OD1", "OD2"]),
-            ("ALA", &["N", "CA", "C", "O", "CB", "OXT"]),
-        ];
-        let mut pdb = String::new();
-        let mut serial = 1;
-        for (seq, (name, atoms)) in residues.iter().enumerate() {
-            for (k, atom) in atoms.iter().enumerate() {
-                let (x, y) = (3.8 * seq as f64, 0.5 * k as f64);
-                let element = &atom[..1];
-                pdb += &format!(
-                    "ATOM  {serial:5} {atom:<4} {name} A{:4}    {x:8.3}{y:8.3}{:8.3}  1.00  0.00          {element:>2}\n",
-                    seq + 1,
-                    0.0
-                );
-                serial += 1;
-            }
-        }
-        pdb += "END\n";
-        pdb.into_bytes()
-    }
+    use crate::onebody::tests::tripeptide;
 
     fn file(name: &str) -> StructureFile {
         StructureFile {

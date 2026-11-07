@@ -3,7 +3,7 @@
 
 use eframe::egui_wgpu::{self, wgpu};
 
-use super::{Camera, Cylinder, Scene, Sphere};
+use super::{Camera, Cylinder, MeshVertex, Scene, Sphere};
 use std::sync::Arc;
 
 #[repr(C)]
@@ -39,6 +39,9 @@ const CYLINDER_ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
     attribute(wgpu::VertexFormat::Float32x4, 48, 4),
 ];
 
+const MESH_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
+
 const fn attribute(
     format: wgpu::VertexFormat,
     offset: u64,
@@ -57,6 +60,7 @@ fn pipeline(
     label: &str,
     source: &str,
     vertices: wgpu::VertexBufferLayout<'_>,
+    primitive: wgpu::PrimitiveState,
 ) -> wgpu::RenderPipeline {
     let shader = rs
         .device
@@ -84,11 +88,7 @@ fn pipeline(
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            // Impostors: four corners per instance.
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
+            primitive,
             depth_stencil: Some(wgpu::DepthStencilState {
                 // Same mapping eframe uses for its own depth attachment, so
                 // formats can't drift.
@@ -105,19 +105,20 @@ fn pipeline(
         })
 }
 
-/// Grow-only GPU buffer of instances.
+/// Grow-only GPU buffer of instances, vertices or indices.
 #[derive(Default)]
-struct Instances {
+struct Buffer {
     buffer: Option<wgpu::Buffer>,
     count: u32,
 }
 
-impl Instances {
+impl Buffer {
     fn upload<T: bytemuck::Pod>(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         items: &[T],
+        usage: wgpu::BufferUsages,
     ) {
         self.count = items.len() as u32;
         let bytes: &[u8] = bytemuck::cast_slice(items);
@@ -133,7 +134,7 @@ impl Instances {
             self.buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
                 size: bytes.len().next_power_of_two() as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                usage: usage | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));
         }
@@ -142,11 +143,41 @@ impl Instances {
         }
     }
 
+    /// None when empty, so nothing is drawn from a stale buffer.
+    fn slice(&self) -> Option<wgpu::BufferSlice<'_>> {
+        let buffer = self.buffer.as_ref().filter(|_| self.count > 0)?;
+        Some(buffer.slice(..))
+    }
+
+    /// Instanced impostors: four corners each.
     fn draw(&self, pass: &mut wgpu::RenderPass<'static>, pipeline: &wgpu::RenderPipeline) {
-        if let Some(buffer) = self.buffer.as_ref().filter(|_| self.count > 0) {
+        if let Some(slice) = self.slice() {
             pass.set_pipeline(pipeline);
-            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.set_vertex_buffer(0, slice);
             pass.draw(0..4, 0..self.count);
+        }
+    }
+}
+
+#[derive(Default)]
+struct MeshBuffers {
+    vertices: Buffer,
+    indices: Buffer,
+}
+
+impl MeshBuffers {
+    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, mesh: &super::Mesh) {
+        let (vertex, index) = (wgpu::BufferUsages::VERTEX, wgpu::BufferUsages::INDEX);
+        self.vertices.upload(device, queue, &mesh.vertices, vertex);
+        self.indices.upload(device, queue, &mesh.indices, index);
+    }
+
+    fn draw(&self, pass: &mut wgpu::RenderPass<'static>, pipeline: &wgpu::RenderPipeline) {
+        if let (Some(vertices), Some(indices)) = (self.vertices.slice(), self.indices.slice()) {
+            pass.set_pipeline(pipeline);
+            pass.set_vertex_buffer(0, vertices);
+            pass.set_index_buffer(indices, wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.indices.count, 0, 0..1);
         }
     }
 }
@@ -154,8 +185,9 @@ impl Instances {
 struct Resources {
     camera: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    spheres: (wgpu::RenderPipeline, Instances),
-    cylinders: (wgpu::RenderPipeline, Instances),
+    spheres: (wgpu::RenderPipeline, Buffer),
+    cylinders: (wgpu::RenderPipeline, Buffer),
+    meshes: (wgpu::RenderPipeline, MeshBuffers),
     /// Key of the scene in the instance buffers, which every viewer shares.
     uploaded: Option<egui::Id>,
 }
@@ -204,12 +236,18 @@ pub fn register(cc: &eframe::CreationContext<'_>) -> bool {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes,
         };
+    // Impostors: four corners per instance.
+    let strip = wgpu::PrimitiveState {
+        topology: wgpu::PrimitiveTopology::TriangleStrip,
+        ..Default::default()
+    };
     let spheres = pipeline(
         rs,
         &layout,
         "spheres",
         include_str!("spheres.wgsl"),
         instanced(std::mem::size_of::<Sphere>(), &SPHERE_ATTRIBUTES),
+        strip,
     );
     let cylinders = pipeline(
         rs,
@@ -217,12 +255,27 @@ pub fn register(cc: &eframe::CreationContext<'_>) -> bool {
         "capsules",
         include_str!("capsules.wgsl"),
         instanced(std::mem::size_of::<Cylinder>(), &CYLINDER_ATTRIBUTES),
+        strip,
+    );
+    // Opaque, so depth sorts it; no culling, so open meshes show both sides.
+    let meshes = pipeline(
+        rs,
+        &layout,
+        "mesh",
+        include_str!("mesh.wgsl"),
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<MeshVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &MESH_ATTRIBUTES,
+        },
+        wgpu::PrimitiveState::default(),
     );
     rs.renderer.write().callback_resources.insert(Resources {
         camera,
         bind_group,
-        spheres: (spheres, Instances::default()),
-        cylinders: (cylinders, Instances::default()),
+        spheres: (spheres, Buffer::default()),
+        cylinders: (cylinders, Buffer::default()),
+        meshes: (meshes, MeshBuffers::default()),
         uploaded: None,
     });
     true
@@ -250,8 +303,12 @@ impl egui_wgpu::CallbackTrait for Draw {
             queue.write_buffer(&r.camera, 0, bytemuck::bytes_of(&camera));
             let (key, scene) = &self.scene;
             if r.uploaded != Some(*key) {
-                r.spheres.1.upload(device, queue, &scene.spheres);
-                r.cylinders.1.upload(device, queue, &scene.cylinders);
+                let instance = wgpu::BufferUsages::VERTEX;
+                r.spheres.1.upload(device, queue, &scene.spheres, instance);
+                r.cylinders
+                    .1
+                    .upload(device, queue, &scene.cylinders, instance);
+                r.meshes.1.upload(device, queue, &scene.mesh);
                 r.uploaded = Some(*key);
             }
         }
@@ -269,6 +326,7 @@ impl egui_wgpu::CallbackTrait for Draw {
             for (pipeline, instances) in [&r.spheres, &r.cylinders] {
                 instances.draw(pass, pipeline);
             }
+            r.meshes.1.draw(pass, &r.meshes.0);
         }
     }
 }

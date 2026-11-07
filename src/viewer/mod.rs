@@ -37,6 +37,33 @@ pub struct Cylinder {
     pub end_color: Rgba,
 }
 
+/// A triangle-mesh vertex, laid out for the GPU.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MeshVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub color: Rgba,
+}
+
+/// Opaque triangles, drawn both sides.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Mesh {
+    pub vertices: Vec<MeshVertex>,
+    /// Three per triangle, into `vertices`.
+    pub indices: Vec<u32>,
+}
+
+impl Mesh {
+    /// One draw call takes every mesh in a scene.
+    pub fn append(&mut self, other: &Mesh) {
+        let offset = self.vertices.len() as u32;
+        self.vertices.extend_from_slice(&other.vertices);
+        self.indices
+            .extend(other.indices.iter().map(|i| i + offset));
+    }
+}
+
 /// (centre, radius) of a sphere enclosing a scene.
 pub type Bounds = ([f32; 3], f32);
 
@@ -45,6 +72,7 @@ pub type Bounds = ([f32; 3], f32);
 pub struct Scene {
     pub spheres: Vec<Sphere>,
     pub cylinders: Vec<Cylinder>,
+    pub mesh: Mesh,
     pub bounds: Bounds,
 }
 
@@ -72,11 +100,12 @@ pub fn register(cc: &eframe::CreationContext<'_>) {
 
 pub struct Viewer {
     camera: Camera,
-    /// What the camera was last fitted to; None asks for a fresh fit.
+    /// What the camera was last fitted to.
     bounds: Option<Bounds>,
     viewport: [f32; 2],
-    /// Once the user moves the camera, only new bounds or a double-click
-    /// refit it, so a running simulation doesn't fight their view.
+    /// Once the user moves the camera, only a double-click or [`Self::reset`]
+    /// refits it, so changing scenes (a running simulation, a re-titrated
+    /// molecule) don't fight their view.
     touched: bool,
     /// The last scene built, by key; the GPU side uploads it when it holds another.
     scene: Option<(egui::Id, Arc<Scene>)>,
@@ -118,7 +147,7 @@ impl Viewer {
         }
         let scene = self.scene.clone().expect("set above");
         if response.double_clicked() {
-            self.bounds = None;
+            self.reset();
         }
         self.fit(scene.1.bounds, [rect.width(), rect.height()]);
         let gesture = gesture::gesture(ui, &response);
@@ -133,21 +162,23 @@ impl Viewer {
         help_badge(ui, rect);
     }
 
-    /// New bounds get a fresh camera; a resize only refits while the user
-    /// hasn't moved it.
+    /// The default view, fitted to the next scene; for when the scene shows
+    /// something else entirely.
+    pub fn reset(&mut self) {
+        self.camera = Camera::new(self.viewport);
+        self.touched = false;
+        self.bounds = None;
+    }
+
+    /// Follows new bounds and resizes until the user moves the camera.
     fn fit(&mut self, bounds: Bounds, viewport: [f32; 2]) {
-        let resized = self.viewport != viewport;
-        let fresh = self.bounds != Some(bounds);
-        if fresh {
-            self.camera = Camera::new(viewport);
-            self.touched = false;
-        }
+        let changed = self.viewport != viewport || self.bounds != Some(bounds);
         self.viewport = viewport;
         self.camera.set_viewport(viewport);
-        if fresh || (resized && !self.touched) {
+        if changed && !self.touched {
             self.camera.fit(bounds.0, bounds.1);
-            self.bounds = Some(bounds);
         }
+        self.bounds = Some(bounds);
     }
 }
 

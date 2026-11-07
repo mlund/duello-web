@@ -651,6 +651,8 @@ impl ManybodyTab {
                 self.running = true;
                 self.unsettled = false;
                 self.run_id += 1;
+                // Another box, perhaps another size: the old view needn't suit it.
+                self.viewer.reset();
                 self.error = None;
                 self.progress = None;
                 self.follow_energy = true;
