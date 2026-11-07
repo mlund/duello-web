@@ -8,11 +8,13 @@ mod scene;
 mod stats;
 mod windows;
 
-use duello::archive::ScanArchive;
+use duello::archive::{CgBody, ScanArchive};
 use duello::nbody::{
-    box_length, HsyFluid, MsaOverrides, NBodyRun, Progress, RunSpec, Stage,
+    box_length, Device, HsyFluid, MsaOverrides, NBodyRun, Progress, RunSpec, Scattering, Stage,
     PARTIAL_SPECIFIC_VOLUME, RESIDUE_FORM_FACTORS,
 };
+use std::future::Future;
+use std::sync::mpsc;
 use windows::Pane;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -43,6 +45,12 @@ pub struct ManybodyTab {
     /// Last (sphere, q_min) checked for an MSA solution, and the answer.
     msa_check: Option<(HsyFluid, f64, bool)>,
     run: Option<NBodyRun>,
+    /// GPU setup for a detailed run, which the browser can't block on.
+    starting: Option<Starting>,
+    /// Bead sums still out on the GPU, so the curve has frames to come.
+    unsettled: bool,
+    /// Why a detailed run fell back to the CPU.
+    gpu_note: Option<String>,
     running: bool,
     /// Sweeps per UI frame, tuned to `FRAME_BUDGET_MS`.
     sweeps_per_frame: u64,
@@ -60,6 +68,13 @@ pub struct ManybodyTab {
     viewer: crate::viewer::Viewer,
     /// Copy shown in the Simulation pane.
     view_copy: usize,
+}
+
+struct Starting {
+    spec: RunSpec,
+    /// The molecule the bead sums place, to detect a scan swapped meanwhile.
+    reference: CgBody,
+    scattering: mpsc::Receiver<anyhow::Result<Scattering>>,
 }
 
 #[derive(Clone, Copy)]
@@ -89,6 +104,9 @@ impl Default for ManybodyTab {
             msa_error: None,
             msa_check: None,
             run: None,
+            starting: None,
+            unsettled: false,
+            gpu_note: None,
             running: false,
             sweeps_per_frame: 10,
             progress: None,
@@ -104,14 +122,21 @@ impl Default for ManybodyTab {
 }
 
 impl ManybodyTab {
-    pub fn is_running(&self) -> bool {
-        self.running
+    /// True while something arrives without user input (sweeps, GPU setup
+    /// or late GPU frames), so the app keeps repainting.
+    pub fn is_busy(&self) -> bool {
+        self.running || self.starting.is_some() || self.unsettled
     }
 
     /// Advances a running simulation by one frame's budget; called every
     /// frame whichever tab is shown, so switching tabs doesn't pause it.
-    pub fn tick(&mut self) {
-        if self.running {
+    /// `archive` completes a GPU setup that finished meanwhile.
+    pub fn tick(&mut self, archive: Option<&ScanArchive>) {
+        self.poll_start(archive);
+        // Every run folds in late GPU frames; a running one steps only once
+        // none are out, so they can't pile up faster than the GPU returns them.
+        let pending = self.settle();
+        if self.running && !pending {
             self.advance();
         }
     }
@@ -154,9 +179,13 @@ impl ManybodyTab {
         let Some(run) = self.produced_run(ui, "S(q)") else {
             return;
         };
+        let curve = run.curve();
+        if curve.frames == 0 {
+            return placeholder(ui, "Waiting for the first frames from the GPU.");
+        }
         let detailed = self.run_info.is_some_and(|i| i.detailed);
         let id = self.run_id;
-        plots::scattering(ui, &run.curve(), &mut self.scattering, detailed, id);
+        plots::scattering(ui, &curve, &mut self.scattering, detailed, id);
     }
 
     fn ui_pair_correlation(&mut self, ui: &mut egui::Ui) {
@@ -224,7 +253,7 @@ impl ManybodyTab {
             ui.label("Run or import a scan of two identical molecules in the Twobody tab first.");
             return;
         };
-        let idle = !self.running;
+        let idle = !self.running && self.starting.is_none();
         let mut fits = true;
         ui.add_enabled_ui(idle, |ui| {
             fits = self.ui_solution(ui, archive);
@@ -248,6 +277,34 @@ impl ManybodyTab {
             .clicked()
         {
             self.start(archive);
+        }
+        self.ui_start_status(ui);
+    }
+
+    fn ui_start_status(&mut self, ui: &mut egui::Ui) {
+        if self.starting.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Setting up GPU…").on_hover_text(
+                    "Preparing the bead sums on the GPU; the run starts when it is ready",
+                );
+                if ui
+                    .button("Cancel")
+                    .on_hover_text("Abandon the GPU setup, e.g. if it never finishes")
+                    .clicked()
+                {
+                    self.starting = None;
+                }
+            });
+        }
+        if let Some(note) = &self.gpu_note {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "GPU unavailable; detailed I(q) on CPU",
+            )
+            .on_hover_text(format!(
+                "Bead sums run on the CPU, slowing the page: {note}"
+            ));
         }
     }
 
@@ -298,8 +355,9 @@ impl ManybodyTab {
             ui.label("Detailed I(q)");
             ui.checkbox(&mut self.detailed, "").on_hover_text(format!(
                 "Also sum over beads for I(q), P(q) and S_eff: a frame every {} sweeps \
-                 instead of {}. S_com and, where it has a solution, the MSA S(q) are \
-                 always shown",
+                 instead of {}. The bead sums run on the GPU (CPU if none), so the \
+                 curves trail the simulation slightly. S_com and, where it has a \
+                 solution, the MSA S(q) are always shown",
                 defaults.sweeps_per_frame, defaults.sweeps_per_check
             ));
             ui.end_row();
@@ -446,7 +504,7 @@ impl ManybodyTab {
         box_length(self.n_bodies, self.millimolar * 1e-3)
     }
 
-    fn start(&mut self, archive: &ScanArchive) {
+    fn spec(&self) -> RunSpec {
         let mut spec = RunSpec::new(self.n_bodies, self.millimolar * 1e-3);
         spec.copies = self.copies;
         spec.centres_only = !self.detailed;
@@ -459,7 +517,65 @@ impl ManybodyTab {
             // Mass-centre frames cost little next to the sweeps between them.
             spec.sweeps_per_frame = spec.sweeps_per_check;
         }
-        match NBodyRun::start(archive, spec, RESIDUE_FORM_FACTORS) {
+        spec
+    }
+
+    /// Detailed runs set up GPU bead sums first; `poll_start` launches them.
+    fn start(&mut self, archive: &ScanArchive) {
+        let mut spec = self.spec();
+        self.gpu_note = None;
+        self.error = None;
+        if !self.detailed {
+            let run = NBodyRun::start(archive, spec, RESIDUE_FORM_FACTORS);
+            return self.launch(archive, run);
+        }
+        spec.device = Device::Gpu;
+        let setup = NBodyRun::scattering(archive, &spec, RESIDUE_FORM_FACTORS);
+        self.starting = Some(Starting {
+            spec,
+            reference: archive.bodies[0].clone(),
+            scattering: spawn(setup),
+        });
+    }
+
+    /// Any setup error falls back to the CPU, which reports it again if it
+    /// wasn't the GPU's. That fallback blocks, harmlessly: CPU setup never
+    /// awaits.
+    fn poll_start(&mut self, archive: Option<&ScanArchive>) {
+        let Some(starting) = self.starting.take() else {
+            return;
+        };
+        let built = match starting.scattering.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => {
+                self.starting = Some(starting);
+                return;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("GPU setup was lost")),
+            Ok(built) => built,
+        };
+        let Starting {
+            mut spec,
+            reference,
+            ..
+        } = starting;
+        let Some(archive) = archive.filter(|a| a.bodies[0] == reference) else {
+            self.error = Some("the scan changed during GPU setup; press Run again".into());
+            return;
+        };
+        let run = match built {
+            Ok(scattering) => NBodyRun::start_with(archive, spec, scattering),
+            Err(e) => {
+                spec.device = Device::Cpu;
+                let run = NBodyRun::start(archive, spec, RESIDUE_FORM_FACTORS);
+                self.gpu_note = run.is_ok().then(|| format!("{e:#}"));
+                run
+            }
+        };
+        self.launch(archive, run);
+    }
+
+    fn launch(&mut self, archive: &ScanArchive, run: anyhow::Result<NBodyRun>) {
+        match run {
             Ok(run) => {
                 self.run = Some(run);
                 self.run_info = Some(RunInfo {
@@ -471,6 +587,7 @@ impl ManybodyTab {
                     tune_steps: self.tune_steps,
                 });
                 self.running = true;
+                self.unsettled = false;
                 self.run_id += 1;
                 self.error = None;
                 self.progress = None;
@@ -486,7 +603,8 @@ impl ManybodyTab {
     fn ui_run_controls(&mut self, ui: &mut egui::Ui) {
         let stage = self.progress.map(|p| p.stage);
         let live = self.run.is_some() && stage != Some(Stage::Stopped);
-        if !live {
+        // A new run is about to replace this one.
+        if !live || self.starting.is_some() {
             return;
         }
         ui.horizontal(|ui| {
@@ -525,6 +643,12 @@ impl ManybodyTab {
         }
     }
 
+    /// The run has stopped itself; `stop` refreshes what the panel shows.
+    fn fail(&mut self, e: anyhow::Error) {
+        self.error = Some(format!("{e:#}"));
+        self.stop();
+    }
+
     fn stop(&mut self) {
         if let Some(run) = &mut self.run {
             run.stop();
@@ -532,6 +656,21 @@ impl ManybodyTab {
             self.progress = run.step(0).ok();
         }
         self.running = false;
+    }
+
+    /// Folds in GPU frames that came back; true while some are still out.
+    fn settle(&mut self) -> bool {
+        let Some(run) = &mut self.run else {
+            return false;
+        };
+        match run.settle() {
+            Ok(pending) => self.unsettled = pending,
+            Err(e) => {
+                self.unsettled = false;
+                self.fail(e);
+            }
+        }
+        self.unsettled
     }
 
     /// One budgeted step, then retune the budget toward `FRAME_BUDGET_MS`.
@@ -544,13 +683,12 @@ impl ManybodyTab {
         let start = Instant::now();
         let progress = match run.step(self.sweeps_per_frame) {
             Ok(progress) => progress,
-            Err(e) => {
-                self.error = Some(format!("{e:#}"));
-                self.running = false;
-                return;
-            }
+            Err(e) => return self.fail(e),
         };
         self.progress = Some(progress);
+        // The step may have sent GPU frames; the next tick's settle tells,
+        // and repaints until then even if the run is paused or stopped.
+        self.unsettled = true;
         if was_equilibrating && progress.stage != Stage::Equilibrating {
             // Production steps cost far more per sweep: start the budget over.
             self.sweeps_per_frame = 1;
@@ -654,4 +792,17 @@ fn placeholder(ui: &mut egui::Ui, text: &str) {
 
 fn grid(id: &str) -> egui::Grid {
     egui::Grid::new(id).num_columns(2).spacing([8.0, 4.0])
+}
+
+/// Runs `future` without blocking the browser's event loop, which GPU
+/// readbacks need; natively it simply completes here.
+fn spawn<T: 'static>(future: impl Future<Output = T> + 'static) -> mpsc::Receiver<T> {
+    let (tx, rx) = mpsc::channel();
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = tx.send(future.await);
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = tx.send(pollster::block_on(future));
+    rx
 }

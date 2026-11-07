@@ -67,14 +67,14 @@ impl eframe::App for DuelloApp {
         let ctx = ui.ctx().clone();
         self.twobody.poll(&ctx);
         egui::Panel::top("tabs").show(ui, |ui| self.ui_tab_strip(ui));
-        self.manybody.tick();
+        self.manybody.tick(self.twobody.archive());
         match self.tab {
             Tab::Onebody => self.onebody.ui(ui),
             Tab::Twobody => self.twobody.ui(ui),
             Tab::Manybody => self.manybody.ui(ui, self.twobody.archive()),
         }
-        // A running many-body simulation advances once per frame.
-        if self.manybody.is_running() {
+        // A busy many-body tab (running, GPU setup, late frames) needs frames.
+        if self.manybody.is_busy() {
             ctx.request_repaint();
         }
     }
