@@ -9,6 +9,13 @@ use std::sync::mpsc;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StructureId(u64);
 
+#[cfg(test)]
+impl StructureId {
+    pub fn for_tests(id: u64) -> Self {
+        Self(id)
+    }
+}
+
 /// A fetch or pick finishing off the UI thread.
 struct Loaded {
     /// Only fetches count as pending: a cancelled pick never reports back.

@@ -174,7 +174,8 @@ impl SolutionConditions {
 
     /// Free salt for the protein `body` (a homo-dimer scan's molecule) or,
     /// without one, a hand-entered Z and molar mass; "Use" adopts it.
-    pub fn estimator_ui(&mut self, ui: &mut egui::Ui, body: Option<&CgBody>) {
+    /// `body` gives Z and mass, with where it comes from for the tooltips.
+    pub fn estimator_ui(&mut self, ui: &mut egui::Ui, body: Option<(&CgBody, &str)>) {
         let (charge, molar_mass) = self.estimator_grid(ui, body);
         let protein_molarity = self.protein_molarity();
         let reservoir = self.estimator.reservoir;
@@ -208,7 +209,7 @@ impl SolutionConditions {
     }
 
     /// The estimator's inputs; returns Z and molar mass in use.
-    fn estimator_grid(&mut self, ui: &mut egui::Ui, body: Option<&CgBody>) -> (f64, f64) {
+    fn estimator_grid(&mut self, ui: &mut egui::Ui, body: Option<(&CgBody, &str)>) -> (f64, f64) {
         let inputs = &mut self.estimator;
         grid("estimator_grid")
             .show(ui, |ui| {
@@ -221,7 +222,7 @@ impl SolutionConditions {
                     )
                 });
                 match body {
-                    Some(body) => scanned_body_rows(ui, body),
+                    Some((body, source)) => body_rows(ui, body, source),
                     None => inputs.hand_entry_rows(ui),
                 }
             })
@@ -248,7 +249,8 @@ impl SolutionConditions {
 impl EstimatorInputs {
     /// Z and molar mass typed in, for when no homo-dimer scan provides them.
     fn hand_entry_rows(&mut self, ui: &mut egui::Ui) -> (f64, f64) {
-        let tip = format!("{CHARGE_TIP}\n\nNo homo-dimer scan loaded: enter it by hand.");
+        let tip =
+            format!("{CHARGE_TIP}\n\nNo homo-dimer scan or titrated structure: enter it by hand.");
         row(ui, "Net charge Z", &tip, |ui| {
             ui.add(
                 egui::DragValue::new(&mut self.charge)
@@ -270,13 +272,13 @@ impl EstimatorInputs {
 }
 
 /// Z and molar mass of the scanned molecule, shown read-only.
-fn scanned_body_rows(ui: &mut egui::Ui, body: &CgBody) -> (f64, f64) {
-    let tip = format!("{CHARGE_TIP}\n\nFrom the Twobody scan's molecule.");
+fn body_rows(ui: &mut egui::Ui, body: &CgBody, source: &str) -> (f64, f64) {
+    let tip = format!("{CHARGE_TIP}\n\nFrom {source}.");
     row(ui, "Net charge Z", &tip, |ui| {
         ui.label(format!("{:+.1} e", body.net_charge()))
     });
-    let tip = "From the Twobody scan's molecule; sets its volume";
-    row(ui, "Molar mass", tip, |ui| {
+    let tip = format!("From {source}; sets its volume");
+    row(ui, "Molar mass", &tip, |ui| {
         ui.label(format!("{:.0} g/mol", body.mass()))
     });
     (body.net_charge(), body.mass())

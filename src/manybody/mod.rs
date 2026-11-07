@@ -3,31 +3,25 @@
 //! I(q), P(q) and S_eff(q), and run statistics. The left panel holds the
 //! inputs and run control; each analysis is a floating window.
 
+mod pane;
 mod plots;
 mod scene;
 mod stats;
-mod windows;
 
 use crate::conditions::SolutionConditions;
 use crate::widgets::{grid, set_in_onebody};
+use crate::windows;
 use duello::archive::{CgBody, ScanArchive};
 use duello::nbody::{
     box_length, Device, HsyFluid, MsaOverrides, NBodyRun, Progress, RunSpec, Scattering, Stage,
     RESIDUE_FORM_FACTORS,
 };
 use duello::solution::PARTIAL_SPECIFIC_VOLUME;
+use pane::Pane;
 use std::future::Future;
 use std::sync::mpsc;
-use windows::Pane;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
-
-/// Wall time per UI frame spent stepping the run, so the page stays
-/// responsive while the run makes progress.
-const FRAME_BUDGET_MS: f64 = 30.0;
+use crate::budget::{self, Instant};
 
 /// The protein concentration comes from the solution conditions, passed in
 /// as `molarity` (mol/L), so Onebody stays its only home.
@@ -59,7 +53,7 @@ pub struct ManybodyTab {
     /// Why a detailed run fell back to the CPU.
     gpu_note: Option<String>,
     running: bool,
-    /// Sweeps per UI frame, tuned to `FRAME_BUDGET_MS`.
+    /// Sweeps per UI frame, tuned by `budget::retune`.
     sweeps_per_frame: u64,
     progress: Option<Progress>,
     scattering: plots::ScatteringView,
@@ -741,7 +735,7 @@ impl ManybodyTab {
         self.unsettled
     }
 
-    /// One budgeted step, then retune the budget toward `FRAME_BUDGET_MS`.
+    /// One budgeted step, then retune the budget.
     fn advance(&mut self) {
         let Some(run) = &mut self.run else { return };
         let was_equilibrating = matches!(
@@ -762,9 +756,7 @@ impl ManybodyTab {
             self.sweeps_per_frame = 1;
             return;
         }
-        let ms = start.elapsed().as_secs_f64() * 1e3;
-        let scale = (FRAME_BUDGET_MS / ms.max(0.1)).clamp(0.1, 2.0);
-        self.sweeps_per_frame = ((self.sweeps_per_frame as f64 * scale) as u64).max(1);
+        self.sweeps_per_frame = budget::retune(self.sweeps_per_frame, start);
     }
 }
 

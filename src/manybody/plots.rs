@@ -1,6 +1,7 @@
 //! Manybody plots: the energy trace, the scattering curves and g(r). Views,
 //! log scaling and error bars stay in here.
 
+use crate::widgets::curve_legend;
 use duello::nbody::{RdfCurve, ScatteringCurve};
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 
@@ -322,11 +323,6 @@ fn draw_series(
                 .width(3.0_f32),
         );
     }
-}
-
-/// Lower right, clear of the low-q rise and g(r)'s contact peak on the left.
-fn curve_legend() -> egui_plot::Legend {
-    egui_plot::Legend::default().position(egui_plot::Corner::RightBottom)
 }
 
 /// U-range over the last half of the sweeps, where the run still drifts

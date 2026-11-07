@@ -1,7 +1,7 @@
 //! A copy's configuration as something the 3D viewer can draw: beads as
 //! spheres, coloured by molecule, inside the box outline.
 
-use crate::viewer::{Cylinder, Rgba, Scene, Sphere};
+use crate::viewer::{categorical_color, Cylinder, Rgba, Scene, Sphere};
 use duello::archive::CgBody;
 use duello::nbody::trajectory::expand;
 use duello::nbody::Frame;
@@ -19,7 +19,7 @@ pub fn scene(frame: &Frame, body: &CgBody) -> Scene {
 fn beads(frame: &Frame, body: &CgBody) -> Vec<Sphere> {
     let mut spheres = Vec::with_capacity(frame.poses.len() * body.radii.len());
     for (molecule, pose) in frame.poses.iter().enumerate() {
-        let color = molecule_color(molecule);
+        let color = categorical_color(molecule);
         let placed = expand(body, pose).into_iter().zip(&body.radii);
         spheres.extend(placed.map(|(bead, &radius)| Sphere {
             center: bead.map(|x| x as f32).into(),
@@ -50,17 +50,6 @@ fn box_edges(l: f32) -> Vec<Cylinder> {
             end_color: GREY,
         })
         .collect()
-}
-
-/// Golden-angle hue steps keep any two nearby indices far apart in colour,
-/// however many molecules there are.
-fn molecule_color(index: usize) -> Rgba {
-    const GOLDEN_TURN: f32 = 0.381_966;
-    let hue = (index as f32 * GOLDEN_TURN).fract();
-    // The shaders write display values, so convert out of egui's linear space.
-    egui::ecolor::Hsva::new(hue, 0.6, 0.9, 1.0)
-        .to_srgba_unmultiplied()
-        .map(|c| f32::from(c) / 255.0)
 }
 
 #[cfg(test)]

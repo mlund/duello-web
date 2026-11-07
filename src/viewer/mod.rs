@@ -46,6 +46,17 @@ pub struct Scene {
     pub bounds: Bounds,
 }
 
+/// Golden-angle hue steps keep any two nearby indices far apart in colour,
+/// however many there are.
+pub fn categorical_color(index: usize) -> Rgba {
+    const GOLDEN_TURN: f32 = 0.381_966;
+    let hue = (index as f32 * GOLDEN_TURN).fract();
+    // The shaders write display values, so convert out of egui's linear space.
+    egui::ecolor::Hsva::new(hue, 0.6, 0.9, 1.0)
+        .to_srgba_unmultiplied()
+        .map(|c| f32::from(c) / 255.0)
+}
+
 /// Set once pipelines exist; without wgpu the view says so instead.
 fn gpu_id() -> egui::Id {
     egui::Id::unique("viewer_gpu")
@@ -65,8 +76,12 @@ pub struct Viewer {
     /// Once the user moves the camera, only new bounds or a double-click
     /// refit it, so a running simulation doesn't fight their view.
     touched: bool,
-    /// Key of the scene last uploaded to the GPU.
-    drawn: Option<egui::Id>,
+}
+
+/// Key of the scene the GPU buffers hold. Global, not per viewer, as every viewer
+/// shares the buffers: after another viewer draws, ours uploads again.
+fn drawn_id() -> egui::Id {
+    egui::Id::unique("viewer_drawn_scene")
 }
 
 impl Default for Viewer {
@@ -76,7 +91,6 @@ impl Default for Viewer {
             bounds: None,
             viewport: [1.0, 1.0],
             touched: false,
-            drawn: None,
         }
     }
 }
@@ -98,7 +112,7 @@ impl Viewer {
         if !ready(ui, rect) {
             return;
         }
-        let scene = self.take_scene(key, build);
+        let scene = take_scene(ui, key, build);
         if response.double_clicked() {
             self.bounds = None;
         }
@@ -118,18 +132,6 @@ impl Viewer {
         help_badge(ui, rect);
     }
 
-    /// The scene to upload, or None when `key` matches the last upload.
-    fn take_scene(
-        &mut self,
-        key: impl std::hash::Hash + std::fmt::Debug,
-        build: impl FnOnce() -> Scene,
-    ) -> Option<Scene> {
-        let key = egui::Id::unique(key);
-        let fresh = self.drawn != Some(key);
-        self.drawn = Some(key);
-        fresh.then(build)
-    }
-
     /// New bounds get a fresh camera; a resize only refits while the user
     /// hasn't moved it.
     fn fit(&mut self, bounds: Bounds, viewport: [f32; 2]) {
@@ -146,6 +148,18 @@ impl Viewer {
             self.bounds = Some(bounds);
         }
     }
+}
+
+/// The scene to upload, or None when the GPU already holds `key`'s.
+fn take_scene(
+    ui: &egui::Ui,
+    key: impl std::hash::Hash + std::fmt::Debug,
+    build: impl FnOnce() -> Scene,
+) -> Option<Scene> {
+    let key = egui::Id::unique(key);
+    let drawn = ui.data_mut(|d| d.get_temp::<egui::Id>(drawn_id()));
+    ui.data_mut(|d| d.insert_temp(drawn_id(), key));
+    (drawn != Some(key)).then(build)
 }
 
 /// Paints the background; false while egui sizes the window or without

@@ -54,7 +54,7 @@ impl DuelloApp {
             structures: Structures::default(),
             conditions: SolutionConditions::default(),
             forcefield: ForceField::default(),
-            onebody: OnebodyTab,
+            onebody: OnebodyTab::default(),
             twobody: TwobodyTab::new(),
             manybody: Default::default(),
         }

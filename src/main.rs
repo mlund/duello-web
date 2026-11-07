@@ -1,4 +1,5 @@
 mod app;
+mod budget;
 mod compute;
 mod conditions;
 mod files;
@@ -12,6 +13,7 @@ mod twobody;
 mod version;
 mod viewer;
 mod widgets;
+mod windows;
 
 fn main() -> eframe::Result {
     #[cfg(not(target_arch = "wasm32"))]
