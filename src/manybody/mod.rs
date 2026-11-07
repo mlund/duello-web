@@ -65,6 +65,8 @@ pub struct ManybodyTab {
     scattering: plots::ScatteringView,
     /// Whether the energy plot tracks the recent range; see `recent_range`.
     follow_energy: bool,
+    /// Run and trace epoch last plotted, to notice the trace restarting.
+    energy_key: Option<(u64, u64)>,
     error: Option<String>,
     /// What the current run was started with, so editing the inputs or
     /// loading another scan doesn't relabel its results.
@@ -120,6 +122,7 @@ impl Default for ManybodyTab {
             progress: None,
             scattering: Default::default(),
             follow_energy: true,
+            energy_key: None,
             error: None,
             run_info: None,
             run_id: 0,
@@ -181,11 +184,23 @@ impl ManybodyTab {
     }
 
     fn ui_energy(&mut self, ui: &mut egui::Ui) {
-        let trace = self.run.as_ref().map_or(&[][..], NBodyRun::energy_trace);
-        if trace.is_empty() {
+        let Some(run) = &self.run else {
             return placeholder(ui, "Start a run to see the energy trace.");
+        };
+        let trace = run.energy_trace();
+        if trace.is_empty() {
+            return placeholder(
+                ui,
+                "Waiting for the first energy check or production frame.",
+            );
         }
-        plots::energy(ui, trace, &mut self.follow_energy, self.run_id);
+        // A restarted trace (production) gets a fresh, following view.
+        let key = (self.run_id, run.energy_trace_epoch());
+        if self.energy_key != Some(key) {
+            self.energy_key = Some(key);
+            self.follow_energy = true;
+        }
+        plots::energy(ui, trace, &mut self.follow_energy, key);
     }
 
     fn ui_scattering_pane(&mut self, ui: &mut egui::Ui) {

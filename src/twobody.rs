@@ -60,8 +60,6 @@ pub struct TwobodyTab {
     /// The pair the shown result was scanned from, for export; None when
     /// unknown, e.g. imported from the CLI.
     scanned: Option<[StructureId; 2]>,
-    /// Export was clicked; the app answers with `export_scan`.
-    export_requested: bool,
     /// A scan just imported, until the app restores its session.
     imported: Option<(ScanSettings, Session)>,
     status: ComputeStatus,
@@ -97,7 +95,6 @@ impl TwobodyTab {
             inputs: ScanInputs::default(),
             selected: [None; 2],
             scanned: None,
-            export_requested: false,
             imported: None,
             status: ComputeStatus::Idle,
             result: None,
@@ -182,15 +179,6 @@ impl TwobodyTab {
         structures: &Structures,
         conditions: &SolutionConditions,
     ) {
-        // The browser shows this in the HTML header instead.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            crate::version::ui(ui);
-            ui.add_space(4.0);
-            ui.separator();
-            ui.add_space(2.0);
-        }
-
         // --- Molecules ---
         ui.strong("Molecules");
         ui.add_space(2.0);
@@ -364,7 +352,7 @@ impl TwobodyTab {
         }
 
         let can_run = self.pair(structures).is_some()
-            && matches!(self.status, ComputeStatus::Idle)
+            && self.idle()
             && validation_errors.is_empty()
             && self.gpu_available;
 
@@ -388,14 +376,6 @@ impl TwobodyTab {
             {
                 self.cancel_flag.store(true, Ordering::Relaxed);
                 self.abandon_scan();
-            }
-            let idle = matches!(self.status, ComputeStatus::Idle);
-            if ui
-                .add_enabled(idle, egui::Button::new("Import scan..."))
-                .on_hover_text("Load an exported .duello scan instead of running one")
-                .clicked()
-            {
-                self.pick_scan_file();
             }
         });
     }
@@ -532,48 +512,6 @@ impl TwobodyTab {
                     result.virial.sigma()
                 ));
             }
-
-            // Download buttons
-            let mut export = false;
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .button("PMF (.csv)")
-                    .on_hover_text("Free energy and mean energy against separation")
-                    .clicked()
-                {
-                    self.download_csv();
-                }
-                if ui
-                    .button("Mol 1 (.xyz)")
-                    .on_hover_text("Coarse-grained beads of molecule 1")
-                    .clicked()
-                {
-                    self.download_string(&result.bodies[0].to_xyz(), "mol1_cg.xyz");
-                }
-                if ui
-                    .button("Mol 2 (.xyz)")
-                    .on_hover_text("Coarse-grained beads of molecule 2")
-                    .clicked()
-                {
-                    self.download_string(&result.bodies[1].to_xyz(), "mol2_cg.xyz");
-                }
-                if ui
-                    .button("Topology (.yaml)")
-                    .on_hover_text("Bead kinds and pair potentials used by the scan")
-                    .clicked()
-                {
-                    self.download_string(&result.topology_yaml, "topology.yaml");
-                }
-                export = ui
-                    .button("Export scan (.duello)")
-                    .on_hover_text(
-                        "Table, CG bodies and results, plus every tab's inputs \
-                        (structures, conditions, Manybody); import restores them",
-                    )
-                    .clicked();
-            });
-            // The app owns every tab's inputs, so it builds the session.
-            self.export_requested |= export;
         }
     }
 
@@ -719,9 +657,41 @@ impl TwobodyTab {
         }
     }
 
-    /// Once per click of Export, for the app to build the session.
-    pub fn take_export_request(&mut self) -> bool {
-        std::mem::take(&mut self.export_requested)
+    /// No scan running, so another can be opened.
+    pub fn idle(&self) -> bool {
+        matches!(self.status, ComputeStatus::Idle)
+    }
+
+    pub fn gpu_available(&self) -> bool {
+        self.gpu_available
+    }
+
+    /// File ▸ Export items: the shown scan's results as plain files.
+    pub fn export_menu(&self, ui: &mut egui::Ui) {
+        let Some(result) = &self.result else { return };
+        if ui
+            .button("PMF (.csv)")
+            .on_hover_text("Free energy and mean energy against separation")
+            .clicked()
+        {
+            self.download_csv();
+        }
+        for (n, body) in result.bodies.iter().enumerate() {
+            if ui
+                .button(format!("Molecule {} (.xyz)", n + 1))
+                .on_hover_text(format!("Coarse-grained beads of molecule {}", n + 1))
+                .clicked()
+            {
+                self.download_string(&body.to_xyz(), &format!("mol{}_cg.xyz", n + 1));
+            }
+        }
+        if ui
+            .button("Topology (.yaml)")
+            .on_hover_text("Bead kinds and pair potentials used by the scan")
+            .clicked()
+        {
+            self.download_string(&result.topology_yaml, "topology.yaml");
+        }
     }
 
     /// The pair the shown result was scanned from, if known.
@@ -754,7 +724,8 @@ impl TwobodyTab {
         download_bytes_as_file(&bytes, NAME);
     }
 
-    fn pick_scan_file(&mut self) {
+    /// File ▸ Open: picks a `.duello` and imports it.
+    pub fn open_scan(&mut self) {
         const FILTER: (&str, &[&str]) = ("Duello scan", &["duello"]);
         // Native: a blocking dialog, so no channel is needed.
         #[cfg(not(target_arch = "wasm32"))]
@@ -799,7 +770,7 @@ impl TwobodyTab {
     /// solution and session reach the other tabs via `take_import`.
     fn import_scan(&mut self, bytes: &[u8]) {
         // A running scan streams into `plot_cache`; an import would mix into it.
-        if !matches!(self.status, ComputeStatus::Idle) {
+        if !self.idle() {
             self.error = Some("Import ignored: a scan is running".into());
             return;
         }

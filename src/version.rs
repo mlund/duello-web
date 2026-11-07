@@ -2,12 +2,12 @@
 //! the HTML header of `index.html`, which also switches between deployed releases and
 //! keeps working even if an old build fails to start.
 
+/// One line for the top bar, which lays out right to left.
 pub fn ui(ui: &mut egui::Ui) {
-    ui.heading("DuelloWeb");
-    ui.label(format!(
-        "v{} · duello {}",
+    ui.hyperlink_to("GitHub", "https://github.com/mlund/duello-web");
+    ui.weak(format!(
+        "DuelloWeb v{} · duello {}",
         env!("CARGO_PKG_VERSION"),
         duello::VERSION
     ));
-    ui.hyperlink_to("GitHub", "https://github.com/mlund/duello-web");
 }

@@ -89,17 +89,70 @@ impl DuelloApp {
         }
     }
 
-    fn ui_tab_strip(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.tab, Tab::Onebody, "Onebody")
-                .on_hover_text("Structures and solution conditions shared by every tab");
-            ui.selectable_value(&mut self.tab, Tab::Twobody, "Twobody")
-                .on_hover_text(
-                    "Orientation-averaged potential of mean force between two molecules",
-                );
-            ui.selectable_value(&mut self.tab, Tab::Manybody, "Manybody")
-                .on_hover_text("Monte Carlo of many copies of the Twobody scan's molecule");
+    /// File menu, tabs, and on the right what is running.
+    fn ui_top_bar(&mut self, ui: &mut egui::Ui) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| self.ui_file_menu(ui));
+            ui.separator();
+            self.ui_tab_strip(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.ui_status(ui)
+            });
         });
+    }
+
+    fn ui_file_menu(&mut self, ui: &mut egui::Ui) {
+        let has_scan = self.twobody.archive().is_some();
+        if ui
+            .add_enabled(self.twobody.idle(), egui::Button::new("Open scan…"))
+            .on_hover_text("Load a .duello scan and restore every tab's inputs saved with it")
+            .on_disabled_hover_text("Not while a scan is running")
+            .clicked()
+        {
+            self.twobody.open_scan();
+        }
+        if ui
+            .add_enabled(has_scan, egui::Button::new("Save scan…"))
+            .on_hover_text(
+                "Table, CG bodies and results, plus every tab's inputs (structures, \
+                 conditions, Manybody), as .duello",
+            )
+            .on_disabled_hover_text("Run or open a scan first")
+            .clicked()
+        {
+            let session = self.session();
+            self.twobody.export_scan(session);
+        }
+        ui.separator();
+        ui.add_enabled_ui(has_scan, |ui| {
+            ui.menu_button("Export", |ui| self.twobody.export_menu(ui))
+                .response
+                .on_hover_text("The shown scan's results as plain files")
+                .on_disabled_hover_text("Run or open a scan first");
+        });
+    }
+
+    fn ui_tab_strip(&mut self, ui: &mut egui::Ui) {
+        ui.selectable_value(&mut self.tab, Tab::Onebody, "Onebody")
+            .on_hover_text("Structures and solution conditions shared by every tab");
+        ui.selectable_value(&mut self.tab, Tab::Twobody, "Twobody")
+            .on_hover_text("Orientation-averaged potential of mean force between two molecules");
+        ui.selectable_value(&mut self.tab, Tab::Manybody, "Manybody")
+            .on_hover_text("Monte Carlo of many copies of the Twobody scan's molecule");
+    }
+
+    /// Right to left: GPU, then (natively) the version, which the browser
+    /// shows in its HTML header instead.
+    fn ui_status(&self, ui: &mut egui::Ui) {
+        if self.twobody.gpu_available() {
+            ui.weak("GPU ✓")
+                .on_hover_text("A GPU/WebGPU adapter is available for scans");
+        } else {
+            ui.colored_label(egui::Color32::LIGHT_RED, "No GPU")
+                .on_hover_text("Scans need WebGPU (Chrome 113+, Edge 113+)");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::version::ui(ui);
     }
 }
 
@@ -108,7 +161,7 @@ impl eframe::App for DuelloApp {
         let ctx = ui.ctx().clone();
         self.structures.poll();
         self.twobody.poll(&ctx);
-        egui::Panel::top("tabs").show(ui, |ui| self.ui_tab_strip(ui));
+        egui::Panel::top("tabs").show(ui, |ui| self.ui_top_bar(ui));
         self.manybody.tick(self.twobody.archive());
         match self.tab {
             Tab::Onebody => {
@@ -123,12 +176,10 @@ impl eframe::App for DuelloApp {
                 .manybody
                 .ui(ui, self.twobody.archive(), &self.conditions),
         }
-        // After the tabs: a native import finishes inside Twobody's UI.
-        if self.twobody.take_export_request() {
-            let session = self.session();
-            self.twobody.export_scan(session);
-        }
+        // After the tabs: a browser import lands while Twobody polls.
         if let Some((settings, session)) = self.twobody.take_import() {
+            // The imported scan shows in Twobody; a cancelled dialog stays put.
+            self.tab = Tab::Twobody;
             self.restore(&settings, session);
             ctx.request_repaint();
         }

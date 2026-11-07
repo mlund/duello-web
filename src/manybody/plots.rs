@@ -213,11 +213,12 @@ pub fn pair_correlation(ui: &mut egui::Ui, curve: &RdfCurve, run_id: u64) {
 }
 
 /// (sweep, U/N) points. Follows the recent energy range until the user
-/// drags or zooms; double-click resumes following.
-pub fn energy(ui: &mut egui::Ui, trace: &[[f64; 2]], follow: &mut bool, run_id: u64) {
+/// drags or zooms; double-click resumes following. A new `key` (run and
+/// trace epoch) gives a fresh view.
+pub fn energy(ui: &mut egui::Ui, trace: &[[f64; 2]], follow: &mut bool, key: (u64, u64)) {
     let color = curve_color(ui.visuals().dark_mode);
     let following = *follow;
-    let response = Plot::new(("energy_trace", run_id))
+    let response = Plot::new(("energy_trace", key))
         .legend(egui_plot::Legend::default())
         .x_axis_label("Sweeps")
         .y_axis_label("U / N (kT)")

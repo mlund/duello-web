@@ -37,7 +37,10 @@ impl Pane {
 
     fn tooltip(self) -> &'static str {
         match self {
-            Pane::Energy => "Energy per molecule, U/N, while the run equilibrates",
+            Pane::Energy => {
+                "Energy per molecule, U/N: through equilibration, then afresh from the \
+                 start of production"
+            }
             Pane::Scattering => "Structure factor and, with Detailed I(q), I(q) and P(q)",
             Pane::PairCorrelation => "Radial distribution of mass centres, g(r)",
             Pane::Stats => "Run state, move acceptance, energy statistics and downloads",
