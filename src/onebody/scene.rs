@@ -1,7 +1,9 @@
 //! A molecule as the 3D viewer draws it: beads or its surface, and its dipole.
 
 use super::surface::{Field, Surface};
-use crate::viewer::{categorical_color, Cylinder, Mesh, MeshVertex, Rgba, Scene, Sphere};
+use crate::viewer::{
+    categorical_color, charge_color, Cylinder, Mesh, MeshVertex, Rgba, Scene, Sphere,
+};
 use duello::archive::CgBody;
 use duello::molecule::Molecule;
 use glam::Vec3;
@@ -230,28 +232,4 @@ fn kind_colours(kinds: &[String]) -> Vec<Rgba> {
             categorical_color(index)
         })
         .collect()
-}
-
-/// Red for negative, blue for positive, saturating at one charge, so a bead's sign
-/// reads at a glance; the surface potential uses the same map.
-pub fn charge_color(z: f64) -> Rgba {
-    cgkitten::coloring::diverging(z)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn charge_colour_shows_the_sign_and_saturates_at_one_charge() {
-        let [r, g, b, a] = charge_color(0.0);
-        assert!(r == g && g == b && a == 1.0, "neutral is grey");
-        let [r, _, b, _] = charge_color(-0.5);
-        assert!(r > b, "negative is red");
-        let [r, _, b, _] = charge_color(0.5);
-        assert!(b > r, "positive is blue");
-        assert_eq!(charge_color(3.0), charge_color(1.0));
-        assert_eq!(charge_color(-3.0), charge_color(-1.0));
-        assert_ne!(charge_color(0.5), charge_color(1.0));
-    }
 }

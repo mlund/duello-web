@@ -3,15 +3,14 @@
 //! I(q), P(q) and S_eff(q), and run statistics. The left panel holds the
 //! inputs and run control; each analysis is a floating window.
 
-mod controls;
-use controls::{Action, Phase};
 mod pane;
 mod plots;
 mod scene;
 mod stats;
 
 use crate::conditions::SolutionConditions;
-use crate::widgets::{grid, set_in_onebody};
+use crate::transport::{Action, Phase, Transport};
+use crate::widgets::{grid, placeholder, set_in_onebody};
 use crate::windows;
 use duello::archive::{CgBody, ScanArchive};
 use duello::nbody::{
@@ -24,6 +23,12 @@ use std::future::Future;
 use std::sync::mpsc;
 
 use crate::budget::{self, Instant};
+
+const TRANSPORT: Transport = Transport {
+    run_tip: "Equilibrate, then sample until stopped",
+    busy: None,
+    stop_tip: "Stop: end the run; its results stay for saving",
+};
 
 /// The protein concentration comes from the solution conditions, passed in
 /// as `molarity` (mol/L), so Onebody stays its only home.
@@ -278,7 +283,7 @@ impl ManybodyTab {
         // changed since the run started.
         let blocked = self.start_blocker(archive, molarity);
         let phase = self.phase();
-        if let Some(action) = controls::ui(ui, phase, blocked, self.can_reset(phase)) {
+        if let Some(action) = TRANSPORT.ui(ui, phase, blocked, Some(self.can_reset(phase))) {
             self.act(action, archive, molarity);
         }
         let phase = self.phase();
@@ -868,10 +873,6 @@ fn copy_picker(ui: &mut egui::Ui, copy: &mut usize, copies: usize) {
 }
 
 /// What a pane shows until it has data.
-fn placeholder(ui: &mut egui::Ui, text: &str) {
-    ui.centered_and_justified(|ui| ui.weak(text));
-}
-
 /// Runs `future` without blocking the browser's event loop, which GPU
 /// readbacks need; natively it simply completes here.
 fn spawn<T: 'static>(future: impl Future<Output = T> + 'static) -> mpsc::Receiver<T> {

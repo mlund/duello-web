@@ -51,6 +51,20 @@ pub fn curve_legend() -> egui_plot::Legend {
     egui_plot::Legend::default().position(egui_plot::Corner::RightBottom)
 }
 
+/// The tabs' main curve colour, so their plots read alike.
+pub fn curve_color(dark_mode: bool) -> egui::Color32 {
+    if dark_mode {
+        egui::Color32::from_rgb(100, 150, 255)
+    } else {
+        egui::Color32::from_rgb(30, 60, 180)
+    }
+}
+
+/// Centred hint where a window's content would be.
+pub fn placeholder(ui: &mut egui::Ui, text: &str) {
+    ui.centered_and_justified(|ui| ui.weak(text));
+}
+
 /// Gap and rule between panel sections.
 pub fn section(ui: &mut egui::Ui) {
     ui.add_space(6.0);

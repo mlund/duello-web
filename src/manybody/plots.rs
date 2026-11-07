@@ -1,7 +1,7 @@
 //! Manybody plots: the energy trace, the scattering curves and g(r). Views,
 //! log scaling and error bars stay in here.
 
-use crate::widgets::curve_legend;
+use crate::widgets::{curve_color, curve_legend};
 use duello::nbody::{RdfCurve, ScatteringCurve};
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 
@@ -264,15 +264,6 @@ fn log_label(label: &str, log: bool) -> String {
         format!("log₁₀ {label}")
     } else {
         label.to_string()
-    }
-}
-
-/// The Twobody tab's PMF blue, so both tabs read alike.
-fn curve_color(dark_mode: bool) -> egui::Color32 {
-    if dark_mode {
-        egui::Color32::from_rgb(100, 150, 255)
-    } else {
-        egui::Color32::from_rgb(30, 60, 180)
     }
 }
 

@@ -87,6 +87,12 @@ pub fn categorical_color(index: usize) -> Rgba {
         .map(|c| f32::from(c) / 255.0)
 }
 
+/// Red for negative, blue for positive, saturating at one charge, so a bead's sign
+/// reads at a glance; Onebody's surface potential and Twobody's poses use the same map.
+pub fn charge_color(z: f64) -> Rgba {
+    cgkitten::coloring::diverging(z)
+}
+
 /// Set once pipelines exist; without wgpu the view says so instead.
 fn gpu_id() -> egui::Id {
     egui::Id::unique("viewer_gpu")
@@ -216,4 +222,22 @@ fn centered_text(ui: &egui::Ui, rect: egui::Rect, text: &str) {
         egui::FontId::proportional(15.0),
         ui.visuals().weak_text_color(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn charge_colour_shows_the_sign_and_saturates_at_one_charge() {
+        let [r, g, b, a] = charge_color(0.0);
+        assert!(r == g && g == b && a == 1.0, "neutral is grey");
+        let [r, _, b, _] = charge_color(-0.5);
+        assert!(r > b, "negative is red");
+        let [r, _, b, _] = charge_color(0.5);
+        assert!(b > r, "positive is blue");
+        assert_eq!(charge_color(3.0), charge_color(1.0));
+        assert_eq!(charge_color(-3.0), charge_color(-1.0));
+        assert_ne!(charge_color(0.5), charge_color(1.0));
+    }
 }

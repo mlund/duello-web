@@ -8,6 +8,9 @@ mod inputs;
 mod manybody;
 mod onebody;
 mod structures;
+#[cfg(test)]
+mod test_archive;
+mod transport;
 mod twobody;
 #[cfg(not(target_arch = "wasm32"))]
 mod version;

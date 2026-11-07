@@ -1,3 +1,7 @@
+mod curves;
+mod pane;
+mod poses;
+mod thermo;
 use crate::compute::{ComputeResult, ComputeStatus};
 use crate::conditions::SolutionConditions;
 #[cfg(target_arch = "wasm32")]
@@ -6,17 +10,21 @@ use crate::files::save_file;
 use crate::forcefield::ForceField;
 use crate::inputs::ScanInputs;
 use crate::structures::{StructureId, Structures};
-use crate::widgets::section;
+use crate::transport::{Action, Phase, Transport};
+use crate::widgets::{placeholder, section};
+use crate::windows;
+use curves::{Curves, Shown};
 use duello::archive::{Session, StructureFile};
-use duello::web_api::{PmfPoint, ScanProgress, ScanSettings};
+use duello::web_api::{ScanProgress, ScanSettings};
 use duello::Subdivision;
-use egui_plot::{Line, MarkerShape, Plot, PlotPoint, Points};
+use pane::Pane;
+use poses::{poses_shown, PosesView};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
-/// Kept on screen while it applies, since it explains why "Run scan" is disabled.
+/// Why Run is disabled, kept on the status line while it applies.
 const NO_GPU: &str =
     "No GPU/WebGPU adapter found. A WebGPU-capable browser is required (Chrome 113+, Edge 113+).";
 
@@ -31,31 +39,12 @@ fn subdivision_label(scheme: Subdivision) -> &'static str {
     }
 }
 
-/// Plot data in egui_plot's own type, so frames borrow it instead of converting.
-/// Filled point by point while a scan runs, then replaced by the final result.
-#[derive(Default)]
-struct PlotCache {
-    pmf: Vec<PlotPoint>,
-    mean_energy: Vec<PlotPoint>,
-    /// -TS = F - U, the entropic part of the free energy.
-    entropy: Vec<PlotPoint>,
-}
-
-impl PlotCache {
-    fn from_result(result: &ComputeResult) -> Self {
-        let mut cache = Self::default();
-        result.points.iter().for_each(|&p| cache.push(p));
-        cache
-    }
-
-    fn push(&mut self, p: PmfPoint) {
-        let r = p.r as f64;
-        let (f, u) = (p.free_energy as f64, p.mean_energy as f64);
-        self.pmf.push(PlotPoint::new(r, f));
-        self.mean_energy.push(PlotPoint::new(r, u));
-        self.entropy.push(PlotPoint::new(r, f - u));
-    }
-}
+/// A scan can't be held, only stopped, which drops it.
+const TRANSPORT: Transport = Transport {
+    run_tip: "Tabulate the pair energy over separations and orientations",
+    busy: Some("Scanning…"),
+    stop_tip: "Stop: abandon the scan; its partial curves are dropped",
+};
 
 /// Two-body scan of a pair picked from Onebody's structures: inputs, the
 /// scan's lifecycle, import/export and the PMF plot.
@@ -70,17 +59,18 @@ pub struct TwobodyTab {
     imported: Option<(ScanSettings, Session)>,
     status: ComputeStatus,
     result: Option<ComputeResult>,
-    /// Cached plot data (computed once from result, reused each frame).
-    plot_cache: Option<PlotCache>,
-    /// Set to true when new results arrive, consumed on next plot render.
-    plot_needs_reset: bool,
+    /// Streamed while a scan runs, then replaced by the result's.
+    curves: Option<Curves>,
+    shown: Shown,
+    poses: PosesView,
     error: Option<String>,
     gpu_available: bool,
     /// Channel for receiving results from background scan thread.
     result_rx: Option<mpsc::Receiver<anyhow::Result<ComputeResult>>>,
     /// Progress and PMF points, one message per finished R-bin.
     progress_rx: Option<mpsc::Receiver<ScanProgress>>,
-    /// Flag to signal cancellation to the running scan.
+    /// Set by Stop. One per scan, so a new scan can't un-cancel an abandoned one
+    /// that has yet to reach its next R-bin.
     cancel_flag: Arc<AtomicBool>,
     /// Bytes of a scan archive picked for import.
     import_rx: Option<mpsc::Receiver<Vec<u8>>>,
@@ -104,9 +94,10 @@ impl TwobodyTab {
             imported: None,
             status: ComputeStatus::Idle,
             result: None,
-            plot_cache: None,
-            plot_needs_reset: false,
-            error: (!gpu_available).then(|| NO_GPU.to_string()),
+            curves: None,
+            shown: Shown::default(),
+            poses: PosesView::default(),
+            error: None,
             gpu_available,
             result_rx: None,
             progress_rx: None,
@@ -163,15 +154,32 @@ impl TwobodyTab {
             });
         });
 
-        egui::Panel::bottom("results")
-            .min_size(80.0)
-            .show(ui, |ui| {
-                self.ui_bottom_panel(ui);
-            });
+        egui::CentralPanel::default().show(ui, |ui| self.ui_windows(ui, is_dark));
+    }
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.ui_center_panel(ui, is_dark);
-        });
+    /// Each pane fetches its data inside its closure, so a collapsed pane costs nothing.
+    fn ui_windows(&mut self, ui: &mut egui::Ui, is_dark: bool) {
+        for pane in Pane::ALL {
+            windows::show(ui, pane, |ui| self.ui_pane(ui, pane, is_dark));
+        }
+    }
+
+    fn ui_pane(&mut self, ui: &mut egui::Ui, pane: Pane, is_dark: bool) {
+        match pane {
+            Pane::FreeEnergy => match &mut self.curves {
+                Some(curves) => curves.ui(ui, &mut self.shown, is_dark),
+                None => placeholder(ui, "Load structures in Onebody and run a scan"),
+            },
+            Pane::Thermodynamics => match &self.result {
+                Some(result) => thermo::thermodynamics(ui, result),
+                None => placeholder(ui, "Available once the scan finishes"),
+            },
+            Pane::Poses => {
+                let result = self.result.as_ref();
+                let shown = poses_shown(&self.status, result);
+                self.poses.ui(ui, result.filter(|_| shown));
+            }
+        }
     }
 
     /// Clears picks whose structure was removed. With neither left, both
@@ -301,46 +309,51 @@ impl TwobodyTab {
         ui.separator();
         ui.add_space(4.0);
 
-        // --- Validation & Run ---
-        let mut validation_errors = Vec::new();
-        if self.inputs.rmin >= self.inputs.rmax {
-            validation_errors.push("The R range must have a lower end below its upper end");
-        }
-        if self.inputs.dr <= 0.0 {
-            validation_errors.push("\u{0394}R must be positive");
-        }
-
-        for err in &validation_errors {
-            ui.colored_label(egui::Color32::LIGHT_RED, *err);
-        }
-
-        let can_run = self.pair(structures).is_some()
-            && self.idle()
-            && validation_errors.is_empty()
-            && self.gpu_available;
-
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(can_run, egui::Button::new("Run scan"))
-                .on_hover_text("Tabulate the pair energy over separations and orientations")
-                .on_disabled_hover_text(
-                    "Needs both molecules picked from Onebody's structures, valid inputs, \
-                    a GPU and no scan running",
-                )
-                .clicked()
-            {
-                self.start_scan(structures, conditions, forcefield);
-            }
-            if matches!(self.status, ComputeStatus::Running { .. })
-                && ui
-                    .button("Cancel")
-                    .on_hover_text("Abandon the running scan")
-                    .clicked()
-            {
+        let blocked = self.start_blocker(structures);
+        match TRANSPORT.ui(ui, self.phase(), blocked, None) {
+            Some(Action::Start) => self.start_scan(structures, conditions, forcefield),
+            Some(Action::Stop) => {
                 self.cancel_flag.store(true, Ordering::Relaxed);
                 self.abandon_scan();
             }
-        });
+            _ => {}
+        }
+        self.ui_status(ui, blocked);
+    }
+
+    /// Why a scan can't start, if it can't.
+    fn start_blocker(&self, structures: &Structures) -> Option<&'static str> {
+        if !self.gpu_available {
+            Some(NO_GPU)
+        } else if self.pair(structures).is_none() {
+            Some("Pick both molecules from Onebody's structures")
+        } else if self.inputs.rmin >= self.inputs.rmax {
+            Some("The R range must have a lower end below its upper end")
+        } else if self.inputs.dr <= 0.0 {
+            Some("\u{0394}R must be positive")
+        } else {
+            None
+        }
+    }
+
+    /// Under the run row: the scan's progress, or why it can't start, then any error.
+    fn ui_status(&self, ui: &mut egui::Ui, blocked: Option<&str>) {
+        match (&self.status, blocked) {
+            (&ComputeStatus::Running { current_r, total_r }, _) => {
+                let progress = current_r as f32 / total_r as f32;
+                ui.add(
+                    egui::ProgressBar::new(progress).text(format!("Step {current_r}/{total_r}")),
+                )
+                .on_hover_text("Separations scanned so far");
+            }
+            (ComputeStatus::Idle, Some(why)) => {
+                ui.weak(why);
+            }
+            (ComputeStatus::Idle, None) => {}
+        }
+        if let Some(err) = &self.error {
+            ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
+        }
     }
 
     /// How the orientation mesh subdivides; two grid cells.
@@ -374,110 +387,6 @@ impl TwobodyTab {
                 "Finest mesh level, refined only where the energy varies. Level 0 is \
                 the 12-vertex icosahedron; this level has {vertices} vertices per sphere."
             ));
-    }
-
-    fn ui_center_panel(&mut self, ui: &mut egui::Ui, is_dark: bool) {
-        let Some(cache) = &self.plot_cache else {
-            ui.centered_and_justified(|ui| {
-                ui.label("Load structures in Onebody and run a scan to see the PMF plot.");
-            });
-            return;
-        };
-        let rgb = |dark: (u8, u8, u8), light: (u8, u8, u8)| {
-            let (r, g, b) = if is_dark { dark } else { light };
-            egui::Color32::from_rgb(r, g, b)
-        };
-        let series = [
-            (
-                "Free energy",
-                &cache.pmf,
-                rgb((100, 150, 255), (30, 60, 180)),
-                MarkerShape::Circle,
-            ),
-            (
-                "Average energy",
-                &cache.mean_energy,
-                rgb((255, 120, 100), (200, 40, 30)),
-                MarkerShape::Diamond,
-            ),
-            (
-                "Entropy (\u{2212}TS)",
-                &cache.entropy,
-                rgb((110, 200, 120), (30, 130, 50)),
-                MarkerShape::Square,
-            ),
-        ];
-
-        let mut plot = Plot::new("pmf_plot")
-            .legend(egui_plot::Legend::default())
-            .auto_bounds(egui::Vec2b::TRUE)
-            .x_axis_label("Center of mass separation, R (\u{00C5})")
-            .y_axis_label("Energy (kT)");
-        // Reset only when a scan starts or ends; auto_bounds follows the growing curve
-        // in between, so the user can still zoom while it runs.
-        if self.plot_needs_reset {
-            plot = plot.reset();
-            self.plot_needs_reset = false;
-        }
-        plot.show(ui, |plot_ui| {
-            for (name, data, color, shape) in series {
-                let data = data.as_slice();
-                plot_ui.line(Line::new(name, data).color(color).width(3.0_f32));
-                // Unnamed, so the legend lists each series once.
-                plot_ui.points(
-                    Points::new("", data)
-                        .color(color)
-                        .shape(shape)
-                        .radius(4.0_f32),
-                );
-            }
-        });
-    }
-
-    fn ui_bottom_panel(&mut self, ui: &mut egui::Ui) {
-        // Progress bar
-        match &self.status {
-            ComputeStatus::Running { current_r, total_r } => {
-                let progress = *current_r as f32 / *total_r as f32;
-                ui.add(
-                    egui::ProgressBar::new(progress)
-                        .text(format!("Step {}/{}", current_r, total_r)),
-                );
-            }
-            ComputeStatus::Idle => {}
-        }
-
-        // Error display
-        if let Some(err) = &self.error {
-            ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
-        }
-
-        // Results
-        if let Some(result) = &self.result {
-            ui.separator();
-            let (mw1, mw2) = result.molar_masses();
-            let (z1, z2) = result.net_charges();
-            ui.label(format!("Mw = {mw1:.1} / {mw2:.1} g/mol"));
-            ui.label(format!("Net charge = {z1:+.1} / {z2:+.1} e"));
-            ui.separator();
-            let b2 = result.virial.b2();
-            ui.label(format!("B\u{2082} = {b2:.2} \u{00C5}\u{00B3}"));
-            ui.label(format!(
-                "B\u{2082} = {:.2e} mol*ml/g\u{00B2}",
-                result.virial.mol_ml_per_gram2(mw1, mw2)
-            ));
-            ui.label(format!(
-                "B\u{2082}/B\u{2082}hs = {:.2}, \u{03C3} = {:.2} \u{00C5}",
-                result.virial.reduced(),
-                result.virial.sigma()
-            ));
-            if let Some(kd) = result.virial.dissociation_const() {
-                ui.label(format!(
-                    "K\u{1D451} = {kd:.2e} mol/l, \u{03C3} = {:.2} \u{00C5}",
-                    result.virial.sigma()
-                ));
-            }
-        }
     }
 
     /// Both picked structures, if both are loaded.
@@ -519,21 +428,20 @@ impl TwobodyTab {
 
         self.error = None;
         self.result = None;
-        self.cancel_flag.store(false, Ordering::Relaxed);
+        self.cancel_flag = Arc::new(AtomicBool::new(false));
         self.status = ComputeStatus::Running {
             current_r: 0,
             total_r: 1,
         };
 
         // Empty until the first R-bin arrives; the plot then grows with the scan.
-        self.plot_cache = Some(PlotCache::default());
-        self.plot_needs_reset = true;
+        self.curves = Some(Curves::new());
 
         let (tx, rx) = mpsc::channel();
         self.result_rx = Some(rx);
         let (prog_tx, prog_rx) = mpsc::channel();
         self.progress_rx = Some(prog_rx);
-        // Checked after every R-bin, which is how Cancel stops the scan.
+        // Checked after every R-bin, which is how Stop ends the scan.
         let cancel = self.cancel_flag.clone();
         let progress = move |p: ScanProgress| {
             let _ = prog_tx.send(p);
@@ -575,8 +483,8 @@ impl TwobodyTab {
                 current_r: p.done,
                 total_r: p.total,
             };
-            if let (Some(point), Some(cache)) = (p.point, &mut self.plot_cache) {
-                cache.push(point);
+            if let (Some(point), Some(curves)) = (p.point, &mut self.curves) {
+                curves.push(point);
             }
         }
     }
@@ -610,20 +518,27 @@ impl TwobodyTab {
         self.status = ComputeStatus::Idle;
         self.result_rx = None;
         self.progress_rx = None;
-        self.plot_cache = None;
+        self.curves = None;
     }
 
     /// Shared by finished scans and imports, so both show a result the same way.
     fn install_result(&mut self, result: ComputeResult) {
-        self.plot_cache = Some(PlotCache::from_result(&result));
-        self.plot_needs_reset = true;
+        self.curves.get_or_insert_with(Curves::new).finish(&result);
         self.result = Some(result);
+        self.poses.invalidate();
     }
 
     /// Save failures only reach the log, as before the scan export existed.
     fn download_string(&self, content: &str, filename: &str) {
         if let Err(e) = save_file(content.as_bytes(), filename) {
             log::error!("Failed to save {filename}: {e}");
+        }
+    }
+
+    fn phase(&self) -> Phase {
+        match self.status {
+            ComputeStatus::Running { .. } => Phase::Running,
+            ComputeStatus::Idle => Phase::Idle,
         }
     }
 
@@ -739,7 +654,7 @@ impl TwobodyTab {
     /// Replaces the shown result and inputs with the imported scan's; its
     /// solution and session reach the other tabs via `take_import`.
     fn import_scan(&mut self, bytes: &[u8]) {
-        // A running scan streams into `plot_cache`; an import would mix into it.
+        // A running scan streams into `curves`; an import would mix into it.
         if !self.idle() {
             self.error = Some("Import ignored: a scan is running".into());
             return;
@@ -748,7 +663,7 @@ impl TwobodyTab {
             Ok(result) => result,
             Err(e) => return self.error = Some(format!("Import failed: {e:#}")),
         };
-        self.error = (!self.gpu_available).then(|| NO_GPU.to_string());
+        self.error = None;
         self.inputs = ScanInputs::from_settings(&result.settings);
         let session = std::mem::take(&mut result.session);
         self.imported = Some((result.settings.clone(), session));
