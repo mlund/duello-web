@@ -3,6 +3,8 @@
 //! I(q), P(q) and S_eff(q), and run statistics. The left panel holds the
 //! inputs and run control; each analysis is a floating window.
 
+mod controls;
+use controls::{Action, Phase};
 mod pane;
 mod plots;
 mod scene;
@@ -270,22 +272,26 @@ impl ManybodyTab {
         archive: Option<&ScanArchive>,
         conditions: &SolutionConditions,
     ) {
-        // Run controls and errors don't depend on the loaded scan, which
-        // may have changed since the run started.
-        self.ui_run_controls(ui);
+        let archive = archive.filter(|a| a.settings.homo_dimer);
+        let molarity = conditions.protein_molarity();
+        // Controls and errors don't depend on the loaded scan, which may have
+        // changed since the run started.
+        let blocked = self.start_blocker(archive, molarity);
+        let phase = self.phase();
+        if let Some(action) = controls::ui(ui, phase, blocked, self.can_reset()) {
+            self.act(action, archive, molarity);
+        }
+        self.ui_status_line(ui, blocked, molarity);
         if let Some(e) = &self.error {
             ui.colored_label(egui::Color32::RED, e);
         }
-        let Some(archive) = archive.filter(|a| a.settings.homo_dimer) else {
-            ui.label("Run or import a scan of two identical molecules in the Twobody tab first.");
+        let Some(archive) = archive else {
             return;
         };
-        let molarity = conditions.protein_molarity();
         let idle = !self.running && self.starting.is_none();
-        let mut fits = true;
         ui.add_enabled_ui(idle, |ui| {
             section(ui, "Monte Carlo");
-            fits = self.ui_box(ui, archive, conditions);
+            self.ui_box(ui, archive, conditions);
             ui.checkbox(&mut self.record_trajectory, "Record trajectory")
                 .on_hover_text(
                     "Keep every production frame (up to 256 MB in browser memory) for the \
@@ -301,35 +307,80 @@ impl ManybodyTab {
         });
         // Theory only: editable while a run goes, which takes each change.
         self.ui_msa(ui, archive, molarity);
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(4.0);
-        if ui
-            .add_enabled(idle && fits, egui::Button::new("Run"))
-            .on_hover_text("Equilibrate, then sample until stopped")
-            .on_disabled_hover_text("Needs a box larger than the table and no run in progress")
-            .clicked()
-        {
-            self.start(archive, molarity);
-        }
-        self.ui_start_status(ui);
     }
 
-    fn ui_start_status(&mut self, ui: &mut egui::Ui) {
-        if self.starting.is_some() {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Setting up GPU…").on_hover_text(
-                    "Preparing the bead sums on the GPU; the run starts when it is ready",
-                );
-                if ui
-                    .button("Cancel")
-                    .on_hover_text("Abandon the GPU setup, e.g. if it never finishes")
-                    .clicked()
-                {
-                    self.starting = None;
+    fn phase(&self) -> Phase {
+        match (self.starting.is_some(), self.live_run().is_some()) {
+            (true, _) => Phase::Starting,
+            (false, true) if self.running => Phase::Running,
+            (false, true) => Phase::Paused,
+            (false, false) => Phase::Idle,
+        }
+    }
+
+    fn can_reset(&self) -> bool {
+        let producing = matches!(
+            self.progress.map(|p| p.stage),
+            Some(Stage::Production { .. })
+        );
+        producing && matches!(self.phase(), Phase::Running | Phase::Paused)
+    }
+
+    /// Why a new run can't start, if it can't.
+    fn start_blocker(&self, archive: Option<&ScanArchive>, molarity: f64) -> Option<&'static str> {
+        let Some(archive) = archive else {
+            return Some("Run or import a scan of two identical molecules in Twobody first");
+        };
+        (self.box_length(molarity) < 2.0 * archive.table.rmax)
+            .then_some("The box is smaller than the table: increase N")
+    }
+
+    fn act(&mut self, action: Action, archive: Option<&ScanArchive>, molarity: f64) {
+        match action {
+            Action::Start => {
+                if let Some(archive) = archive {
+                    self.start(archive, molarity);
                 }
-            });
+            }
+            Action::Pause => self.running = false,
+            Action::Resume => self.running = true,
+            Action::Stop if self.starting.is_some() => self.starting = None,
+            Action::Stop => self.stop(),
+            Action::ResetStatistics => self.reset_statistics(),
+        }
+    }
+
+    /// One line under the controls: what the run is doing, or why it can't start.
+    fn ui_status_line(&self, ui: &mut egui::Ui, blocked: Option<&str>, molarity: f64) {
+        let sweeps = |p: Option<Progress>| p.map_or(0, |p| p.sweep);
+        match self.phase() {
+            Phase::Starting => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak("Setting up GPU…")
+                });
+            }
+            Phase::Running | Phase::Paused => {
+                let paused = if self.running { "" } else { "Paused · " };
+                let stage = self
+                    .progress
+                    .map_or("starting", |p| stats::stage_label(p.stage));
+                ui.weak(format!(
+                    "{paused}{stage} · {} sweeps",
+                    sweeps(self.progress)
+                ));
+            }
+            Phase::Idle => {
+                let text = match blocked {
+                    Some(why) => why.to_string(),
+                    None if self.stopped() => format!(
+                        "Stopped after {} sweeps; results stay for saving",
+                        sweeps(self.progress)
+                    ),
+                    None => format!("Ready: L = {:.0} Å", self.box_length(molarity)),
+                };
+                ui.weak(text);
+            }
         }
         if let Some(note) = &self.gpu_note {
             ui.colored_label(
@@ -342,14 +393,14 @@ impl ManybodyTab {
         }
     }
 
-    /// N and the box it makes at Onebody's concentration; false if the box
-    /// is too small for the table.
+    /// N and the box it makes at Onebody's concentration, flagged when too
+    /// small for the table.
     fn ui_box(
         &mut self,
         ui: &mut egui::Ui,
         archive: &ScanArchive,
         conditions: &SolutionConditions,
-    ) -> bool {
+    ) {
         let molarity = conditions.protein_molarity();
         grid("manybody_box").show(ui, |ui| {
             ui.label("Molecules, N");
@@ -371,14 +422,12 @@ impl ManybodyTab {
                 ));
         }
         let needed = 2.0 * archive.table.rmax;
-        let fits = l >= needed;
-        if !fits {
+        if l < needed {
             ui.colored_label(
                 egui::Color32::LIGHT_RED,
                 format!("Box below the table's {needed:.0} Å: increase N"),
             );
         }
-        fits
     }
 
     fn ui_scattering(&mut self, ui: &mut egui::Ui, molarity: f64) {
@@ -654,41 +703,6 @@ impl ManybodyTab {
 
     /// Pause keeps the run, unlike Stop; a paused run can also be
     /// replaced by pressing Run.
-    fn ui_run_controls(&mut self, ui: &mut egui::Ui) {
-        let stage = self.progress.map(|p| p.stage);
-        let live = self.run.is_some() && stage != Some(Stage::Stopped);
-        // A new run is about to replace this one.
-        if !live || self.starting.is_some() {
-            return;
-        }
-        ui.horizontal(|ui| {
-            let pause = if self.running { "Pause" } else { "Resume" };
-            let hint = if self.running {
-                "Hold the run; resume where it left off"
-            } else {
-                "Continue the held run"
-            };
-            if ui.button(pause).on_hover_text(hint).clicked() {
-                self.running = !self.running;
-            }
-            if ui
-                .button("Stop")
-                .on_hover_text("End the run; its results stay for saving")
-                .clicked()
-            {
-                self.stop();
-            }
-        });
-        let producing = matches!(stage, Some(Stage::Production { .. }));
-        let reset = ui
-            .add_enabled(producing, egui::Button::new("Reset statistics"))
-            .on_hover_text("Discard production frames so far and keep sampling")
-            .on_disabled_hover_text("Available once production starts");
-        if reset.clicked() {
-            self.reset_statistics();
-        }
-    }
-
     fn reset_statistics(&mut self) {
         let Some(run) = &mut self.run else { return };
         match run.reset_statistics() {

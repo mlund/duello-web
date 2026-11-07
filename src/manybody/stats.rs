@@ -45,7 +45,7 @@ fn show_or_dash(x: Option<f64>, digits: usize) -> String {
     x.map_or("–".to_string(), |v| format!("{v:.digits$}"))
 }
 
-fn stage_label(stage: Stage) -> &'static str {
+pub(super) fn stage_label(stage: Stage) -> &'static str {
     match stage {
         Stage::Equilibrating => "equilibrating",
         Stage::Production { equilibrated: true } => "production",
