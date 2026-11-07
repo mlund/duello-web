@@ -20,7 +20,7 @@ impl crate::windows::Pane for Pane {
         match self {
             Pane::FreeEnergy => "Free energy",
             Pane::Thermodynamics => "Thermodynamics",
-            Pane::Poses => "Poses",
+            Pane::Poses => "Low Energy Poses",
         }
     }
 
