@@ -1,6 +1,6 @@
 //! A small finished scan for tests, with a real table behind it.
 
-use duello::archive::{CgBody, ScanArchive, ScanSettings, Session};
+use duello::archive::{CgBody, ScanArchive, ScanSettings};
 use duello::web_api::PmfPoint;
 use duello::{AdaptiveBuilder, VirialCoeff};
 
@@ -23,7 +23,6 @@ pub fn archive() -> ScanArchive {
         points,
         virial,
         topology_yaml: String::new(),
-        session: Session::default(),
     }
 }
 

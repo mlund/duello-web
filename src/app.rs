@@ -111,7 +111,9 @@ impl DuelloApp {
         let has_scan = self.twobody.archive().is_some();
         if ui
             .add_enabled(self.twobody.idle(), egui::Button::new("Open scan…"))
-            .on_hover_text("Load a .duello scan and restore every tab's inputs saved with it")
+            .on_hover_text(
+                "Load a .duello.zip session and restore every tab's inputs saved with it",
+            )
             .on_disabled_hover_text("Not while a scan is running")
             .clicked()
         {
@@ -121,7 +123,7 @@ impl DuelloApp {
             .add_enabled(has_scan, egui::Button::new("Save scan…"))
             .on_hover_text(
                 "Table, CG bodies and results, plus every tab's inputs (structures \
-                 and their names, force field, conditions, Manybody), as .duello",
+                 and their names, force field, conditions, Manybody), as .duello.zip",
             )
             .on_disabled_hover_text("Run or open a scan first")
             .clicked()

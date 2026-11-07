@@ -15,6 +15,7 @@ use crate::widgets::{placeholder, section};
 use crate::windows;
 use curves::{Curves, Shown};
 use duello::archive::{Session, StructureFile};
+use duello::bundle::{Bundle, BundleRef};
 use duello::web_api::{ScanProgress, ScanSettings};
 use duello::Subdivision;
 use pane::Pane;
@@ -588,16 +589,20 @@ impl TwobodyTab {
     /// asks for the path first: serializing the table can take a while, and
     /// is wasted if the dialog is cancelled.
     pub fn export_scan(&mut self, session: Session) {
-        let Some(result) = &mut self.result else {
+        let Some(result) = &self.result else {
             return;
         };
-        result.session = session;
-        const NAME: &str = "scan.duello";
+        const NAME: &str = "scan.duello.zip";
         #[cfg(not(target_arch = "wasm32"))]
         let Some(path) = rfd::FileDialog::new().set_file_name(NAME).save_file() else {
             return;
         };
-        let bytes = match result.to_bytes() {
+        let bundle = BundleRef {
+            session: &session,
+            scan: Some(result),
+            run: None,
+        };
+        let bytes = match bundle.to_zip(&Default::default()) {
             Ok(bytes) => bytes,
             Err(e) => return self.error = Some(format!("Export failed: {e:#}")),
         };
@@ -609,9 +614,10 @@ impl TwobodyTab {
         download_bytes_as_file(&bytes, NAME);
     }
 
-    /// File ▸ Open: picks a `.duello` and imports it.
+    /// File ▸ Open: picks a `.duello.zip` and imports it.
     pub fn open_scan(&mut self) {
-        const FILTER: (&str, &[&str]) = ("Duello scan", &["duello"]);
+        // `duello` too, so an old file gets the re-run message instead of being hidden.
+        const FILTER: (&str, &[&str]) = ("Duello session", &["zip", "duello"]);
         // Native: a blocking dialog, so no channel is needed.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = rfd::FileDialog::new()
@@ -659,13 +665,17 @@ impl TwobodyTab {
             self.error = Some("Import ignored: a scan is running".into());
             return;
         }
-        let mut result = match ComputeResult::from_bytes(bytes) {
-            Ok(result) => result,
+        let (session, result) = match Bundle::from_zip(bytes) {
+            Ok(Bundle {
+                session,
+                scan: Some(scan),
+                ..
+            }) => (session, scan),
+            Ok(_) => return self.error = Some("Import failed: the session holds no scan".into()),
             Err(e) => return self.error = Some(format!("Import failed: {e:#}")),
         };
         self.error = None;
         self.inputs = ScanInputs::from_settings(&result.settings);
-        let session = std::mem::take(&mut result.session);
         self.imported = Some((result.settings.clone(), session));
         self.scanned = None;
         self.install_result(result);
@@ -673,13 +683,7 @@ impl TwobodyTab {
 
     fn download_csv(&self) {
         let Some(result) = &self.result else { return };
-        let mut csv = String::from("R/A,F/kT,U/kT\n");
-        for p in &result.points {
-            csv.push_str(&format!(
-                "{:.2},{:.4},{:.4}\n",
-                p.r, p.free_energy, p.mean_energy
-            ));
-        }
+        let csv = duello::report::pmf_csv(&result.points);
         self.download_string(&csv, "pmf.csv");
     }
 }
