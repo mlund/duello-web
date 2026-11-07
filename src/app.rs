@@ -147,9 +147,14 @@ impl DuelloApp {
             .on_hover_text("Monte Carlo of many copies of the Twobody scan's molecule");
     }
 
-    /// Right to left: GPU, then (natively) the version, which the browser
-    /// shows in its HTML header instead.
+    /// Right to left: theme, GPU, then (natively) the version, which the
+    /// browser shows in its HTML header instead.
     fn ui_status(&self, ui: &mut egui::Ui) {
+        // Three small icons (System, Dark, Light), in reading order: the bar
+        // lays out right to left.
+        let size = egui::vec2(72.0, ui.available_height());
+        let layout = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(size, layout, egui::widgets::global_theme_preference_buttons);
         if self.twobody.gpu_available() {
             ui.weak("GPU ✓")
                 .on_hover_text("A GPU/WebGPU adapter is available for scans");
