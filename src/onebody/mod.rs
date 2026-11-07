@@ -33,7 +33,9 @@ impl OnebodyTab {
         let selected = structures
             .selected()
             .and_then(|id| Some((id, structures.get(id)?)));
-        if self.view.tick(selected, forcefield, conditions) {
+        // Not while a value is dragged, so a drag restarts once, on release.
+        let settled = ui.ctx().dragged_id().is_none();
+        if self.view.tick(selected, forcefield, conditions, settled) {
             ui.ctx().request_repaint();
         }
         egui::Panel::left("onebody_inputs")

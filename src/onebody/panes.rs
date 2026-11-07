@@ -89,9 +89,9 @@ impl Quantity {
 
     fn label(self) -> &'static str {
         match self {
-            Quantity::Charge => "⟨Z⟩",
-            Quantity::Dipole => "√⟨μ²⟩",
-            Quantity::Quadrupole => "√⟨Q²⟩",
+            Quantity::Charge => "Charge",
+            Quantity::Dipole => "Dipole",
+            Quantity::Quadrupole => "Quadrupole",
             Quantity::Capacitance => "Capacitance",
         }
     }
@@ -99,22 +99,19 @@ impl Quantity {
     fn axis(self) -> &'static str {
         match self {
             Quantity::Charge => "⟨Z⟩ (e)",
-            Quantity::Dipole => "√⟨μ²⟩ (e·Å)",
-            Quantity::Quadrupole => "√⟨Q²⟩ (e·Å²)",
+            Quantity::Dipole => "⟨μ⟩ (e·Å)",
+            Quantity::Quadrupole => "⟨Q⟩ (e·Å²)",
             Quantity::Capacitance => "⟨Z²⟩ − ⟨Z⟩² (e²)",
         }
     }
 
     fn tooltip(self) -> &'static str {
         match self {
-            Quantity::Charge => "Mean net charge",
-            Quantity::Dipole => {
-                "Root-mean-square dipole moment about the mass centre; unlike ⟨μ⟩, \
-                 exact for Henderson–Hasselbalch too, so the curves compare"
-            }
+            Quantity::Charge => "Mean net charge ⟨Z⟩",
+            Quantity::Dipole => "Mean dipole moment ⟨μ⟩ about the mass centre",
             Quantity::Quadrupole => {
-                "Root-mean-square quadrupole norm about the mass centre; unlike ⟨Q⟩, \
-                 exact for Henderson–Hasselbalch too, so the curves compare"
+                "Mean quadrupole ⟨Q⟩ = ⟨‖Θ‖⟩, the norm of the traceless (Buckingham) \
+                 tensor about the mass centre"
             }
             Quantity::Capacitance => {
                 "Charge fluctuation: how readily the charge responds to a nearby charge"

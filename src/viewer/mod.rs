@@ -2,6 +2,8 @@
 //! what the Manybody box needs. Callers hand over a [`Scene`] each frame;
 //! wgpu, the camera and input stay in here.
 
+use std::sync::Arc;
+
 mod camera;
 mod gesture;
 mod gpu;
@@ -76,12 +78,8 @@ pub struct Viewer {
     /// Once the user moves the camera, only new bounds or a double-click
     /// refit it, so a running simulation doesn't fight their view.
     touched: bool,
-}
-
-/// Key of the scene the GPU buffers hold. Global, not per viewer, as every viewer
-/// shares the buffers: after another viewer draws, ours uploads again.
-fn drawn_id() -> egui::Id {
-    egui::Id::unique("viewer_drawn_scene")
+    /// The last scene built, by key; the GPU side uploads it when it holds another.
+    scene: Option<(egui::Id, Arc<Scene>)>,
 }
 
 impl Default for Viewer {
@@ -91,6 +89,7 @@ impl Default for Viewer {
             bounds: None,
             viewport: [1.0, 1.0],
             touched: false,
+            scene: None,
         }
     }
 }
@@ -112,20 +111,22 @@ impl Viewer {
         if !ready(ui, rect) {
             return;
         }
-        let scene = take_scene(ui, key, build);
+        // Salted with where the viewer sits, as the GPU buffers are shared.
+        let key = ui.scope_id().with(key);
+        if self.scene.as_ref().map(|s| s.0) != Some(key) {
+            self.scene = Some((key, Arc::new(build())));
+        }
+        let scene = self.scene.clone().expect("set above");
         if response.double_clicked() {
             self.bounds = None;
         }
-        let bounds = scene.as_ref().map(|s| s.bounds).or(self.bounds);
-        if let Some(bounds) = bounds {
-            self.fit(bounds, [rect.width(), rect.height()]);
-        }
+        self.fit(scene.1.bounds, [rect.width(), rect.height()]);
         let gesture = gesture::gesture(ui, &response);
         self.touched |= gesture != gesture::Gesture::default();
         gesture::apply(&mut self.camera, gesture);
         let draw = gpu::Draw {
             camera: self.camera,
-            instances: scene.map(|s| (s.spheres, s.cylinders)),
+            scene,
         };
         ui.painter()
             .add(eframe::egui_wgpu::Callback::new_paint_callback(rect, draw));
@@ -148,18 +149,6 @@ impl Viewer {
             self.bounds = Some(bounds);
         }
     }
-}
-
-/// The scene to upload, or None when the GPU already holds `key`'s.
-fn take_scene(
-    ui: &egui::Ui,
-    key: impl std::hash::Hash + std::fmt::Debug,
-    build: impl FnOnce() -> Scene,
-) -> Option<Scene> {
-    let key = egui::Id::unique(key);
-    let drawn = ui.data_mut(|d| d.get_temp::<egui::Id>(drawn_id()));
-    ui.data_mut(|d| d.insert_temp(drawn_id(), key));
-    (drawn != Some(key)).then(build)
 }
 
 /// Paints the background; false while egui sizes the window or without

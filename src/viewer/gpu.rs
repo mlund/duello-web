@@ -3,7 +3,8 @@
 
 use eframe::egui_wgpu::{self, wgpu};
 
-use super::{Camera, Cylinder, Sphere};
+use super::{Camera, Cylinder, Scene, Sphere};
+use std::sync::Arc;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -155,6 +156,8 @@ struct Resources {
     bind_group: wgpu::BindGroup,
     spheres: (wgpu::RenderPipeline, Instances),
     cylinders: (wgpu::RenderPipeline, Instances),
+    /// Key of the scene in the instance buffers, which every viewer shares.
+    uploaded: Option<egui::Id>,
 }
 
 /// Sets up pipelines once; false if the app runs without wgpu.
@@ -220,6 +223,7 @@ pub fn register(cc: &eframe::CreationContext<'_>) -> bool {
         bind_group,
         spheres: (spheres, Instances::default()),
         cylinders: (cylinders, Instances::default()),
+        uploaded: None,
     });
     true
 }
@@ -227,8 +231,9 @@ pub fn register(cc: &eframe::CreationContext<'_>) -> bool {
 /// One frame's draw calls, painted inside the viewer's rect.
 pub struct Draw {
     pub camera: Camera,
-    /// None redraws the last upload, so an unchanged scene costs no copy.
-    pub instances: Option<(Vec<Sphere>, Vec<Cylinder>)>,
+    /// Uploaded only when the GPU holds another key: an unchanged scene costs no
+    /// copy, and a frame egui discards can't leave the buffers stale.
+    pub scene: (egui::Id, Arc<Scene>),
 }
 
 impl egui_wgpu::CallbackTrait for Draw {
@@ -243,9 +248,11 @@ impl egui_wgpu::CallbackTrait for Draw {
         if let Some(r) = resources.get_mut::<Resources>() {
             let camera = CameraUniform::from(&self.camera);
             queue.write_buffer(&r.camera, 0, bytemuck::bytes_of(&camera));
-            if let Some((spheres, cylinders)) = &self.instances {
-                r.spheres.1.upload(device, queue, spheres);
-                r.cylinders.1.upload(device, queue, cylinders);
+            let (key, scene) = &self.scene;
+            if r.uploaded != Some(*key) {
+                r.spheres.1.upload(device, queue, &scene.spheres);
+                r.cylinders.1.upload(device, queue, &scene.cylinders);
+                r.uploaded = Some(*key);
             }
         }
         Vec::new()

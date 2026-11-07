@@ -99,13 +99,15 @@ impl Default for MoleculeView {
 }
 
 impl MoleculeView {
-    /// Call every frame Onebody shows; true while titrating or filling the
-    /// curve, so the caller keeps repainting.
+    /// Call every frame Onebody shows; true while titrating, filling the curve
+    /// or holding a change, so the caller keeps repainting. Changes wait until
+    /// `settled` (nothing dragged), so a dragged value restarts once.
     pub fn tick(
         &mut self,
         structure: Option<(StructureId, &StructureFile)>,
         forcefield: &ForceField,
         conditions: &SolutionConditions,
+        settled: bool,
     ) -> bool {
         let Some((id, file)) = structure else {
             // Only the list emptying gets here; UI choices stay.
@@ -120,10 +122,14 @@ impl MoleculeView {
             ionic_strength: conditions.ionic_strength,
             temperature: conditions.temperature,
         };
-        if self.key != Some(key) {
+        let held = self.key != Some(key) && !settled;
+        if self.key != Some(key) && settled {
             self.restart(key, &file.contents);
         }
         self.advance();
+        if held {
+            return true;
+        }
         self.titrating.is_some() || self.curve_running()
     }
 
@@ -248,6 +254,9 @@ impl MoleculeView {
     /// One frame's sweeps: the current pH first, then the curve. Both titrate the
     /// same molecule, so they share one budget.
     fn advance(&mut self) {
+        if let Some((_, curve)) = &mut self.curve {
+            curve.advance_ideal();
+        }
         let sweeps = self.sweeps_per_frame as usize;
         let start = Instant::now();
         if let Some(titrating) = self.titrating.take() {
@@ -327,7 +336,7 @@ mod tests {
     fn finish(view: &mut MoleculeView, file: &StructureFile, conditions: &SolutionConditions) {
         let id = StructureId::for_tests(0);
         for _ in 0..10_000 {
-            if !view.tick(Some((id, file)), &ForceField::default(), conditions) {
+            if !view.tick(Some((id, file)), &ForceField::default(), conditions, true) {
                 return;
             }
         }
@@ -344,12 +353,12 @@ mod tests {
 
         let id = StructureId::for_tests(0);
         let ff = ForceField::default();
-        assert!(!view.tick(Some((id, &file("renamed"))), &ff, &neutral));
+        assert!(!view.tick(Some((id, &file("renamed"))), &ff, &neutral, true));
         assert_eq!(net_charge(&view), at_7);
 
         let mut acidic = SolutionConditions::default();
         acidic.ph = 3.0;
-        assert!(view.tick(Some((id, &file("renamed"))), &ff, &acidic));
+        assert!(view.tick(Some((id, &file("renamed"))), &ff, &acidic, true));
         assert_eq!(net_charge(&view), at_7, "shown until pH 3 finishes");
         finish(&mut view, &file("renamed"), &acidic);
         // Asp and the C-terminus take protons: from about 0 to about +1.
@@ -358,5 +367,23 @@ mod tests {
             "{at_7} → {}",
             net_charge(&view)
         );
+    }
+
+    /// Dragging a value would otherwise restart every frame; the change waits
+    /// for the release.
+    #[test]
+    fn restarts_wait_until_a_drag_ends() {
+        let mut view = MoleculeView::default();
+        finish(&mut view, &file("a"), &SolutionConditions::default());
+        let at_7 = net_charge(&view);
+        let mut acidic = SolutionConditions::default();
+        acidic.ph = 3.0;
+        let (id, ff) = (StructureId::for_tests(0), ForceField::default());
+        for _ in 0..1000 {
+            assert!(view.tick(Some((id, &file("a"))), &ff, &acidic, false));
+        }
+        assert_eq!(net_charge(&view), at_7, "held while dragging");
+        finish(&mut view, &file("a"), &acidic);
+        assert!(net_charge(&view) - at_7 > 0.8);
     }
 }
