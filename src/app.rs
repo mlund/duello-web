@@ -73,11 +73,11 @@ impl DuelloApp {
         }
     }
 
-    /// Every tab's inputs; the inverse of `restore`. Structures removed
-    /// since the scan leave its pair unknown.
+    /// Every tab's inputs; the inverse of `restore`. Structures removed, or
+    /// with other chains, since the scan leave its pair unknown.
     fn session(&self) -> Session {
         let structures = &self.structures;
-        let scanned = (self.twobody.scanned())
+        let scanned = (self.twobody.scanned(structures))
             .and_then(|[a, b]| Some([structures.index_of(a)?, structures.index_of(b)?]));
         let inputs = (self.twobody.inputs()).settings(&self.conditions, &self.forcefield);
         Session {
@@ -92,8 +92,8 @@ impl DuelloApp {
     /// Onebody's analysed molecule, which only the saved file shows.
     fn extracts(&self) -> Extracts<'_> {
         let selected = self.structures.selected();
-        let named = selected.and_then(|id| Some((id, &self.structures.get(id)?.name)));
-        let molecule = named.and_then(|(id, name)| self.onebody.extract(id, name));
+        let file = selected.and_then(|id| Some((id, self.structures.get(id)?)));
+        let molecule = file.and_then(|(id, file)| self.onebody.extract(id, file));
         Extracts {
             molecules: molecule.into_iter().collect(),
         }
@@ -191,7 +191,8 @@ impl DuelloApp {
         let ids = self.structures.replace(structures);
         // Indices were checked against the structures on load.
         if let Some([a, b]) = scanned {
-            self.twobody.select_scanned([ids[a], ids[b]]);
+            self.twobody
+                .select_scanned([ids[a], ids[b]], &self.structures);
         }
     }
 
@@ -356,6 +357,7 @@ mod tests {
         saved.structures.replace(vec![StructureFile {
             name: "tri.pdb".into(),
             contents: tripeptide(),
+            ..Default::default()
         }]);
         (saved.conditions.ph, saved.conditions.ionic_strength) = (4.5, 0.02);
         (

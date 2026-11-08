@@ -31,6 +31,8 @@ struct Entry {
     /// Restored when a rename is cleared: the name as loaded, or as saved in a
     /// session, which keeps no other.
     file_name: String,
+    /// The file's chains and residue counts; parsed once, as contents never change.
+    found: Vec<(String, usize)>,
 }
 
 pub struct Structures {
@@ -54,6 +56,8 @@ enum RowAction {
     Select(StructureId),
     Edit(StructureId),
     Rename(StructureId, String),
+    /// Chains to keep; empty keeps all.
+    Chains(StructureId, Vec<String>),
     CancelEdit,
     Remove(StructureId),
 }
@@ -159,10 +163,15 @@ impl Structures {
         }
     }
 
-    fn push(&mut self, file: StructureFile) {
+    /// Chains are made canonical, so equal selections compare equal however
+    /// they were saved.
+    fn push(&mut self, mut file: StructureFile) {
+        let found = duello::molecule::chains(&file.contents);
+        file.chains = canonical(&found, |c| keeps(&file.chains, c));
         self.entries.push(Entry {
             id: StructureId(self.next_id),
             file_name: file.name.clone(),
+            found,
             file,
         });
         self.next_id += 1;
@@ -192,11 +201,15 @@ impl Structures {
         let selected = self.selected();
         let mut action = None;
         for entry in &self.entries {
+            let is_selected = selected == Some(entry.id);
             let row = match &mut self.editing {
                 Some((id, text)) if *id == entry.id => rename_row(ui, entry.id, text),
-                _ => entry_row(ui, entry, selected == Some(entry.id)),
+                _ => entry_row(ui, entry, is_selected),
             };
             action = row.or(action);
+            if is_selected {
+                action = chains_row(ui, entry).or(action);
+            }
         }
         match action {
             Some(RowAction::Select(id)) => self.select(id),
@@ -206,6 +219,11 @@ impl Structures {
             Some(RowAction::Rename(id, name)) => {
                 self.rename(id, &name);
                 self.editing = None;
+            }
+            Some(RowAction::Chains(id, chains)) => {
+                if let Some(entry) = self.entry_mut(id) {
+                    entry.file.chains = chains;
+                }
             }
             Some(RowAction::CancelEdit) => self.editing = None,
             Some(RowAction::Remove(id)) => self.remove(id),
@@ -252,6 +270,7 @@ impl Structures {
                 .map(|contents| StructureFile {
                     name: format!("{pdb_id}.pdb"),
                     contents,
+                    ..Default::default()
                 })
                 .map_err(|e| format!("Fetching {pdb_id} failed: {e:#}")),
         };
@@ -281,6 +300,7 @@ impl Structures {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default(),
                 contents,
+                ..Default::default()
             }),
             Err(e) => self.error = Some(format!("Reading {} failed: {e}", path.display())),
         }
@@ -299,6 +319,7 @@ impl Structures {
                     file: Ok(StructureFile {
                         name: file.file_name(),
                         contents,
+                        ..Default::default()
                     }),
                 });
             }
@@ -330,6 +351,61 @@ fn entry_row(ui: &mut egui::Ui, entry: &Entry, selected: bool) -> Option<RowActi
         }
     })
     .inner
+}
+
+/// A checkbox per chain, for files with several; at least one stays kept.
+fn chains_row(ui: &mut egui::Ui, entry: &Entry) -> Option<RowAction> {
+    if entry.found.len() < 2 {
+        return None;
+    }
+    let kept = |chain: &str| keeps(&entry.file.chains, chain);
+    let n_kept = entry.found.iter().filter(|(c, _)| kept(c)).count();
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(12.0);
+        ui.label("Chains").on_hover_text(
+            "Chains to keep when coarse-graining. Onebody and Twobody both use this \
+             choice; termini are taken from the full file.",
+        );
+        let mut action = None;
+        for (chain, residues) in &entry.found {
+            let tip = format!("Chain {chain}: {residues} residues");
+            let mut on = kept(chain);
+            let last = on && n_kept == 1;
+            let response = ui
+                .add_enabled(
+                    !last,
+                    egui::Checkbox::new(&mut on, format!("{chain} ({residues})")),
+                )
+                .on_hover_text(&tip)
+                .on_disabled_hover_text(format!("{tip}. The last kept chain can't be removed."));
+            if response.changed() {
+                let chains = canonical(&entry.found, |c| if c == chain { on } else { kept(c) });
+                action = Some(RowAction::Chains(entry.id, chains));
+            }
+        }
+        action
+    })
+    .inner
+}
+
+/// Whether a stored selection keeps `chain`; empty keeps all.
+fn keeps(chains: &[String], chain: &str) -> bool {
+    chains.is_empty() || chains.iter().any(|c| c == chain)
+}
+
+/// The `found` chains that `keep` accepts, in file order. All of them, or none,
+/// is stored as none, so the file keeps meaning "all chains" and names it
+/// lacks drop out.
+fn canonical(found: &[(String, usize)], keep: impl Fn(&str) -> bool) -> Vec<String> {
+    let chains: Vec<String> = (found.iter().map(|(c, _)| c))
+        .filter(|c| keep(c))
+        .cloned()
+        .collect();
+    if chains.len() == found.len() {
+        Vec::new()
+    } else {
+        chains
+    }
 }
 
 /// The entry being renamed, in place of its row. Enter or clicking away commits;
@@ -390,6 +466,7 @@ mod tests {
         StructureFile {
             name: name.into(),
             contents: contents.to_vec(),
+            ..Default::default()
         }
     }
 

@@ -50,9 +50,9 @@ pub struct TwobodyTab {
     inputs: ScanInputs,
     /// Molecules 1 and 2; the same entry twice is a homo-dimer.
     selected: [Option<StructureId>; 2],
-    /// The pair the shown result was scanned from, for export; None when
-    /// unknown, e.g. opened from a CLI scan.
-    scanned: Option<[StructureId; 2]>,
+    /// The pair the shown result was scanned from, with the chains each kept,
+    /// for export; None when unknown, e.g. opened from a CLI scan.
+    scanned: Option<[(StructureId, Vec<String>); 2]>,
     status: ComputeStatus,
     result: Option<ComputeResult>,
     /// Streamed while a scan runs, then replaced by the result's.
@@ -141,10 +141,12 @@ impl TwobodyTab {
         self.error = Some(message);
     }
 
-    /// Picks the restored pair, as the scan shown was made from it.
-    pub fn select_scanned(&mut self, pair: [StructureId; 2]) {
+    /// Picks the restored pair, as the scan shown was made from it with
+    /// the chains it was saved with.
+    pub fn select_scanned(&mut self, pair: [StructureId; 2], structures: &Structures) {
         self.selected = pair.map(Some);
-        self.scanned = Some(pair);
+        let get = |id| Some((id, structures.get(id)?.chains.clone()));
+        self.scanned = get(pair[0]).zip(get(pair[1])).map(<[_; 2]>::from);
     }
 
     pub fn ui(
@@ -220,6 +222,10 @@ impl TwobodyTab {
             }
             if let Some(why) = conditions.stale(settings) {
                 differs_from_scan(ui, &why, "conditions");
+            }
+            if self.chains_changed(structures) {
+                let why = "A scanned structure keeps other chains now";
+                differs_from_scan(ui, why, "chains");
             }
         }
 
@@ -384,9 +390,12 @@ impl TwobodyTab {
     }
 
     /// Both picked structures, if both are loaded.
-    fn pair<'a>(&self, structures: &'a Structures) -> Option<[&'a StructureFile; 2]> {
-        let [a, b] = self.selected;
-        Some([structures.get(a?)?, structures.get(b?)?])
+    fn pair<'a>(
+        &self,
+        structures: &'a Structures,
+    ) -> Option<[(StructureId, &'a StructureFile); 2]> {
+        let get = |id: Option<StructureId>| Some((id?, structures.get(id?)?));
+        Some([get(self.selected[0])?, get(self.selected[1])?])
     }
 
     fn ui_molecules(&mut self, ui: &mut egui::Ui, structures: &Structures) {
@@ -414,11 +423,11 @@ impl TwobodyTab {
         conditions: &SolutionConditions,
         forcefield: &ForceField,
     ) {
-        let Some([mol1, mol2]) = self.pair(structures) else {
+        let Some(picked) = self.pair(structures) else {
             return;
         };
-        let (mol1_data, mol2_data) = (mol1.contents.clone(), mol2.contents.clone());
-        self.scanned = self.selected[0].zip(self.selected[1]).map(<[_; 2]>::from);
+        self.scanned = Some(picked.map(|(id, file)| (id, file.chains.clone())));
+        let pair = picked.map(|(_, file)| file.clone());
 
         self.error = None;
         self.result = None;
@@ -451,8 +460,7 @@ impl TwobodyTab {
         #[cfg(not(target_arch = "wasm32"))]
         {
             std::thread::spawn(move || {
-                let result =
-                    crate::compute::run_scan_blocking(settings, mol1_data, mol2_data, progress);
+                let result = crate::compute::run_scan_blocking(settings, pair, progress);
                 let _ = tx.send(result);
             });
         }
@@ -460,8 +468,7 @@ impl TwobodyTab {
         #[cfg(target_arch = "wasm32")]
         {
             wasm_bindgen_futures::spawn_local(async move {
-                let result =
-                    crate::compute::run_scan_async(settings, mol1_data, mol2_data, progress).await;
+                let result = crate::compute::run_scan_async(settings, pair, progress).await;
                 let _ = tx.send(result);
             });
         }
@@ -624,10 +631,20 @@ impl TwobodyTab {
         }
     }
 
-    /// The pair the shown result was scanned from, if known; a running scan
-    /// already names its pair, but shows no result yet.
-    pub fn scanned(&self) -> Option<[StructureId; 2]> {
-        self.result.as_ref().and(self.scanned)
+    /// Whether a scanned structure, still loaded, now keeps other chains.
+    fn chains_changed(&self, structures: &Structures) -> bool {
+        (self.scanned.iter().flatten()).any(|s| keeps_scanned(structures, s) == Some(false))
+    }
+
+    /// The pair the shown result was scanned from, if known and both still
+    /// keep the chains scanned; a running scan already names its pair, but
+    /// shows no result yet.
+    pub fn scanned(&self, structures: &Structures) -> Option<[StructureId; 2]> {
+        let scanned = self.result.as_ref().and(self.scanned.as_ref())?;
+        let unchanged = scanned
+            .iter()
+            .all(|s| keeps_scanned(structures, s) == Some(true));
+        unchanged.then(|| scanned.each_ref().map(|(id, _)| *id))
     }
 
     fn download_csv(&self) {
@@ -635,6 +652,15 @@ impl TwobodyTab {
         let csv = duello::report::pmf_csv(&result.points);
         self.download_string(&csv, "pmf.csv");
     }
+}
+
+/// Whether a scanned structure still keeps the chains it was scanned with;
+/// None once removed.
+fn keeps_scanned(
+    structures: &Structures,
+    (id, chains): &(StructureId, Vec<String>),
+) -> Option<bool> {
+    structures.get(*id).map(|f| f.chains == *chains)
 }
 
 /// Warns that Onebody's `what` no longer matches the scan on screen.

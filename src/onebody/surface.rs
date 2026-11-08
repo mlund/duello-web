@@ -187,6 +187,7 @@ mod tests {
             ionic_strength,
             temperature: 298.15,
             mc_sweeps: 0,
+            chains: Vec::new(),
         };
         let pdb = crate::onebody::tests::tripeptide();
         match Titrating::start(&pdb, spec, 1).unwrap().advance(usize::MAX) {

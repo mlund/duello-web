@@ -8,7 +8,7 @@ use crate::structures::Structures;
 use crate::widgets::section;
 use crate::windows::{self, Slot};
 use analysis::MoleculeView;
-use duello::archive::CgBody;
+use duello::archive::{CgBody, StructureFile};
 use duello::bundle::MoleculeExtract;
 
 mod analysis;
@@ -57,8 +57,12 @@ impl OnebodyTab {
     }
 
     /// The analysed molecule for a saved session, if it is structure `id`.
-    pub fn extract<'a>(&'a self, id: StructureId, name: &'a str) -> Option<MoleculeExtract<'a>> {
-        self.view.extract(id, name)
+    pub fn extract<'a>(
+        &'a self,
+        id: StructureId,
+        file: &'a StructureFile,
+    ) -> Option<MoleculeExtract<'a>> {
+        self.view.extract(id, file)
     }
 
     fn ui_inputs(

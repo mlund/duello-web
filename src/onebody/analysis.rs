@@ -16,6 +16,12 @@ use duello::molecule::{Curve, Molecule, MoleculeSpec, Step, Titrating};
 use duello::system::TITRATION_SWEEPS;
 use std::hash::{Hash, Hasher};
 
+fn hash(value: &(impl Hash + ?Sized)) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Fixed, so the same inputs always titrate to the same charges.
 const SEED: u64 = 1;
 
@@ -41,6 +47,8 @@ const MC_CURVE_STEPS: u32 = 20;
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Key {
     contents: u64,
+    /// Hash of the kept chains, which can change for the same contents.
+    chains: u64,
     forcefield: ForceField,
     ph: f64,
     ionic_strength: f64,
@@ -55,7 +63,8 @@ impl Key {
 
     /// Same molecule, perhaps other conditions: its last result still describes it.
     fn same_molecule(self, other: Self) -> bool {
-        (self.contents, self.forcefield) == (other.contents, other.forcefield)
+        let molecule = |k: Self| (k.contents, k.chains, k.forcefield);
+        molecule(self) == molecule(other)
     }
 }
 
@@ -119,6 +128,7 @@ impl MoleculeView {
         };
         let key = Key {
             contents: self.contents_hash(id, &file.contents),
+            chains: hash(&file.chains),
             forcefield: *forcefield,
             ph: conditions.ph,
             ionic_strength: conditions.ionic_strength,
@@ -126,7 +136,7 @@ impl MoleculeView {
         };
         let held = self.key != Some(key) && !settled;
         if self.key != Some(key) && settled {
-            self.restart(key, &file.contents);
+            self.restart(key, file);
         }
         self.advance();
         if held {
@@ -145,19 +155,23 @@ impl MoleculeView {
     }
 
     /// The shown molecule for a saved session, if titrated from structure
-    /// `id`: it lags a selection made while Onebody was hidden. The curve
-    /// only once complete, and only if it is this molecule's.
-    pub fn extract<'a>(&'a self, id: StructureId, name: &'a str) -> Option<MoleculeExtract<'a>> {
+    /// `id` with its current chains: it lags a change made while Onebody was
+    /// hidden. The curve only once complete, and only if it is this molecule's.
+    pub fn extract<'a>(
+        &'a self,
+        id: StructureId,
+        file: &'a StructureFile,
+    ) -> Option<MoleculeExtract<'a>> {
         let (key, molecule) = self.shown.as_ref()?;
         // An id's contents never change, so its cached hash identifies it.
-        if self.hashed != Some((id, key.contents)) {
+        if self.hashed != Some((id, key.contents)) || key.chains != hash(&file.chains) {
             return None;
         }
         let curve = (self.curve.as_ref())
             .filter(|(k, c)| *k == key.curve() && c.is_done())
             .map(|(_, c)| c);
         Some(MoleculeExtract {
-            name,
+            name: &file.name,
             ph: key.ph,
             molecule,
             curve,
@@ -225,16 +239,15 @@ impl MoleculeView {
         match self.hashed {
             Some((seen, hash)) if seen == id => hash,
             _ => {
-                let mut hasher = std::hash::DefaultHasher::new();
-                contents.hash(&mut hasher);
-                let hash = hasher.finish();
+                let hash = hash(contents);
                 self.hashed = Some((id, hash));
                 hash
             }
         }
     }
 
-    fn restart(&mut self, key: Key, pdb: &[u8]) {
+    fn restart(&mut self, key: Key, file: &StructureFile) {
+        let pdb = &file.contents[..];
         if !self.key.is_some_and(|old| old.same_molecule(key)) {
             self.shown = None;
             self.scene.reset_camera();
@@ -248,6 +261,7 @@ impl MoleculeView {
             ionic_strength: key.ionic_strength,
             temperature: key.temperature,
             mc_sweeps: TITRATION_SWEEPS,
+            chains: file.chains.clone(),
         };
         let started = self
             .update_curve(key, pdb, &spec)
@@ -309,6 +323,7 @@ mod tests {
         StructureFile {
             name: name.into(),
             contents: tripeptide(),
+            ..Default::default()
         }
     }
 
@@ -376,20 +391,27 @@ mod tests {
     fn extract_is_the_shown_molecule_with_a_finished_curve() {
         let mut view = MoleculeView::default();
         let (id, other) = (StructureId::for_tests(0), StructureId::for_tests(1));
-        assert!(view.extract(id, "a").is_none(), "nothing titrated yet");
+        assert!(
+            view.extract(id, &file("a")).is_none(),
+            "nothing titrated yet"
+        );
         let mut conditions = SolutionConditions::default();
         conditions.ph = 4.5;
         let ff = ForceField::default();
         while view.body().is_none() {
             view.tick(Some((id, &file("a"))), &ff, &conditions, true);
         }
-        let extract = view.extract(id, "a").unwrap();
+        let a = file("a");
+        let extract = view.extract(id, &a).unwrap();
         assert_eq!((extract.name, extract.ph), ("a", 4.5));
-        assert!(view.extract(other, "b").is_none(), "not what was titrated");
+        assert!(
+            view.extract(other, &file("b")).is_none(),
+            "not what was titrated"
+        );
         assert!(extract.curve.is_none(), "curve still titrating");
 
         finish(&mut view, &file("a"), &conditions);
-        let curve = view.extract(id, "a").unwrap().curve.unwrap();
+        let curve = view.extract(id, &a).unwrap().curve.unwrap();
         assert_eq!(curve.points().len(), 21, "pH 2–12 every 0.5");
     }
 }
