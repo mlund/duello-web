@@ -2,7 +2,7 @@
 
 use crate::widgets::{grid, row};
 use duello::archive::ScanArchive;
-use duello::{Association, VirialCoeff};
+use duello::{open_at_sigma, weight_at_sigma, Association, VirialCoeff, OPEN_AT_SIGMA};
 
 /// Every quantity here comes from the PMF at a fixed pair potential, so T-derivatives
 /// leave out how εᵣ, κ and titration change with temperature.
@@ -13,6 +13,7 @@ pub fn thermodynamics(ui: &mut egui::Ui, archive: &ScanArchive) {
     grid("twobody_thermo").striped(true).show(ui, |ui| {
         virial_rows(ui, archive);
         let sigma = archive.virial.sigma();
+        opening_row(ui, weight_at_sigma(&archive.points, sigma));
         if let Some(association) = Association::from_pmf(&archive.points, sigma) {
             association_rows(ui, &association);
         }
@@ -72,6 +73,24 @@ fn virial_rows(ui: &mut egui::Ui, archive: &ScanArchive) {
             ),
         ],
     );
+}
+
+/// Red where the pair still meets at σ, since B₂₂ then depends on R_min.
+fn opening_row(ui: &mut egui::Ui, weight: Option<f64>) {
+    let tip = format!(
+        "Boltzmann weight at σ. Below σ the pair counts as hard spheres, \
+         which is exact only if this is ≈ 0. Red from {OPEN_AT_SIGMA}: lower R_min and \
+         rescan, or refine dR if closer R overlap. \"B₂₂ by start\" in the Free energy \
+         window shows where B₂₂ levels off."
+    );
+    let text = weight.map_or(egui::RichText::new("–"), |w| {
+        let text = egui::RichText::new(format!("{w:.3}"));
+        match open_at_sigma(w) {
+            true => text.color(ui.visuals().error_fg_color),
+            false => text,
+        }
+    });
+    row(ui, "e^(−w/kT) at σ", &tip, |ui| ui.label(text));
 }
 
 /// Shown only where K_a > 0, i.e. net attraction beyond hard spheres.

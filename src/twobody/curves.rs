@@ -14,14 +14,16 @@ pub enum Shown {
     MeanForce,
     HeatCapacity,
     VirialRunning,
+    B2Start,
 }
 
 impl Shown {
-    const ALL: [Shown; 4] = [
+    const ALL: [Shown; 5] = [
         Shown::FreeEnergy,
         Shown::MeanForce,
         Shown::HeatCapacity,
         Shown::VirialRunning,
+        Shown::B2Start,
     ];
 
     fn label(&self) -> &'static str {
@@ -30,6 +32,7 @@ impl Shown {
             Shown::MeanForce => "Mean force",
             Shown::HeatCapacity => "Heat capacity",
             Shown::VirialRunning => "B₂₂ up to R",
+            Shown::B2Start => "B₂₂ by start",
         }
     }
 
@@ -51,6 +54,10 @@ impl Shown {
                 "B₂₂ integrated out to R; it should level off well before the last R, \
                  else extend the scan range. Shown once the scan finishes"
             }
+            Shown::B2Start => {
+                "B₂₂ as if the scan had started at R, with hard spheres below; it should \
+                 level off towards the smallest R, else lower R_min. Shown once the scan finishes"
+            }
         }
     }
 
@@ -59,7 +66,7 @@ impl Shown {
             Shown::FreeEnergy => "Energy (kT)",
             Shown::MeanForce => "Mean force (kT/Å)",
             Shown::HeatCapacity => "C(R)/k",
-            Shown::VirialRunning => "B₂₂ (Å³)",
+            Shown::VirialRunning | Shown::B2Start => "B₂₂ (Å³)",
         }
     }
 }
@@ -91,6 +98,8 @@ pub struct Curves {
     heat_capacity: Vec<PlotPoint>,
     /// B₂₂ out to R; needs the whole PMF, so only a finished scan has it.
     b2: Vec<PlotPoint>,
+    /// B₂₂ by scan start R′; likewise only once finished.
+    b2_start: Vec<PlotPoint>,
     /// Refit the axes next frame: a scan started or ended, or another curve shows.
     reset: bool,
 }
@@ -121,11 +130,9 @@ impl Curves {
     pub fn finish(&mut self, archive: &ScanArchive) {
         *self = Self::new();
         archive.points.iter().for_each(|&p| self.push(p));
-        let running = VirialCoeff::running(&archive.points, archive.virial.sigma());
-        self.b2 = running
-            .into_iter()
-            .map(|(r, b2)| PlotPoint::new(r, b2))
-            .collect();
+        let sigma = archive.virial.sigma();
+        self.b2 = plot_points(VirialCoeff::running(&archive.points, sigma));
+        self.b2_start = plot_points(VirialCoeff::by_start(&archive.points, sigma));
     }
 
     /// A picker over the curves, then the picked one's plot.
@@ -179,8 +186,13 @@ impl Curves {
             Shown::MeanForce => one("−dw/dR", &self.mean_force[..]),
             Shown::HeatCapacity => one("C(R)/k", &self.heat_capacity[..]),
             Shown::VirialRunning => one("B₂₂(R)", &self.b2[..]),
+            Shown::B2Start => one("B₂₂(R′)", &self.b2_start[..]),
         }
     }
+}
+
+fn plot_points(xy: Vec<(f64, f64)>) -> Vec<PlotPoint> {
+    xy.into_iter().map(|(x, y)| PlotPoint::new(x, y)).collect()
 }
 
 /// −dw/dR (kT/Å) by central difference; the end points lack a neighbour.
