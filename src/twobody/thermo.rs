@@ -12,9 +12,7 @@ const FIXED_POTENTIAL: &str = "At a fixed pair potential: leaves out how the per
 pub fn thermodynamics(ui: &mut egui::Ui, archive: &ScanArchive) {
     grid("twobody_thermo").striped(true).show(ui, |ui| {
         virial_rows(ui, archive);
-        let sigma = archive.virial.sigma();
-        opening_row(ui, weight_at_sigma(&archive.points, sigma));
-        if let Some(association) = Association::from_pmf(&archive.points, sigma) {
+        if let Some(association) = Association::new(&archive.virial, &archive.points) {
             association_rows(ui, &association);
         }
     });
@@ -44,17 +42,41 @@ fn virial_rows(ui: &mut egui::Ui, archive: &ScanArchive) {
                 format!("{:.3e} mL·mol/g²", virial.mol_ml_per_gram2(mw1, mw2)),
             ),
             (
-                "B₂₂/B₂₂ʰˢ",
-                "Reduced: B₂₂ over the hard-sphere value 2πσ³/3".into(),
+                "B₂₂ʳᵉᶠ",
+                "Second virial coefficient of the same pair with only hard-bead excluded \
+                 volume (bead radii from the topology), averaged over orientations; \
+                 needs no σ."
+                    .into(),
+                format!("{:.3e} Å³", virial.reference()),
+            ),
+            (
+                "B₂₂/B₂₂ʳᵉᶠ",
+                "Reduced: B₂₂ over the hard-bead reference B₂₂ʳᵉᶠ. Below 1: attraction \
+                 beyond the beads' own excluded volume."
+                    .into(),
                 format!("{:.2}", virial.reduced()),
             ),
             (
+                "σ_eff",
+                "Diameter of hard spheres with the same B₂₂ as the hard-bead pair, \
+                 (3B₂₂ʳᵉᶠ/2π)^⅓."
+                    .into(),
+                format!("{:.1} Å", virial.sigma_eff()),
+            ),
+            (
                 "σ",
-                "Closest separation scanned; below it the pair counts as hard spheres. \
-                 B₂₂ depends on it, so compare reduced values with care."
+                "Closest separation scanned, where the B₂₂ integral starts; below it the \
+                 pair counts as hard spheres. Only the integration start: the reduced \
+                 B₂₂ and K_d use B₂₂ʳᵉᶠ instead."
                     .into(),
                 format!("{sigma:.1} Å"),
             ),
+        ],
+    );
+    opening_row(ui, weight_at_sigma(&archive.points, sigma));
+    rows(
+        ui,
+        &[
             (
                 "G₂₂",
                 "Kirkwood–Buff integral of the pair at infinite dilution, implicit solvent \
@@ -93,7 +115,7 @@ fn opening_row(ui: &mut egui::Ui, weight: Option<f64>) {
     row(ui, "e^(−w/kT) at σ", &tip, |ui| ui.label(text));
 }
 
-/// Shown only where K_a > 0, i.e. net attraction beyond hard spheres.
+/// Shown only where K_a > 0, i.e. net attraction beyond the hard-bead reference.
 fn association_rows(ui: &mut egui::Ui, association: &Association) {
     let standard = "Standard state 1 M.";
     rows(
@@ -101,8 +123,9 @@ fn association_rows(ui: &mut egui::Ui, association: &Association) {
         &[
             (
                 "K_d",
-                "Dissociation constant 1/K_a, with K_a = −2(B₂₂ − B₂₂ʰˢ): the attraction \
-                 beyond hard spheres, with no contact criterion for a complex."
+                "Dissociation constant 1/K_a, with K_a = −2(B₂₂ − B₂₂ʳᵉᶠ): the attraction \
+                 beyond the beads' own excluded volume, with no contact criterion for a \
+                 complex. It depends on how the reference is defined; B₂₂ does not (Hill)."
                     .into(),
                 format!("{:.2e} M", association.ka.recip()),
             ),
