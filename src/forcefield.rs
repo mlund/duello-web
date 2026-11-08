@@ -102,7 +102,7 @@ impl ForceField {
         })
     }
 
-    /// Takes an imported scan's choice. One the UI can't select (e.g. a CLI `--top`
+    /// Takes an opened session's choice. One the UI can't select (e.g. a CLI `--top`
     /// scan) keeps the current choice, and the returned warning says so.
     pub fn adopt(&mut self, settings: &ScanSettings) -> Option<String> {
         match Self::of_scan(settings) {
@@ -111,7 +111,7 @@ impl ForceField {
                 None
             }
             None => Some(format!(
-                "Imported scan uses model '{}', which the panel can't select",
+                "The opened session uses model '{}', which the panel can't select",
                 settings.model
             )),
         }

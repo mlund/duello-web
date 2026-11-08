@@ -2,10 +2,11 @@ use crate::conditions::SolutionConditions;
 use crate::forcefield::ForceField;
 use crate::manybody::ManybodyTab;
 use crate::onebody::OnebodyTab;
+use crate::session_file::SessionFile;
 use crate::structures::Structures;
 use crate::twobody::TwobodyTab;
 use duello::archive::Session;
-use duello::web_api::ScanSettings;
+use duello::bundle::{Bundle, BundleRef, Extracts};
 
 pub struct DuelloApp {
     tab: Tab,
@@ -16,6 +17,9 @@ pub struct DuelloApp {
     onebody: OnebodyTab,
     twobody: TwobodyTab,
     manybody: ManybodyTab,
+    file: SessionFile,
+    /// Why the last open or save failed, until dismissed.
+    notice: Option<String>,
 }
 
 /// Single-protein analysis, two-body scan, or many-body MC built on the scan.
@@ -49,6 +53,11 @@ impl DuelloApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_fallback_font(&cc.egui_ctx);
         crate::viewer::register(cc);
+        Self::blank()
+    }
+
+    /// No structures, default inputs, no scan or run.
+    fn blank() -> Self {
         Self {
             tab: Tab::Onebody,
             structures: Structures::default(),
@@ -57,40 +66,108 @@ impl DuelloApp {
             onebody: OnebodyTab::default(),
             twobody: TwobodyTab::new(),
             manybody: Default::default(),
+            file: SessionFile::default(),
+            notice: None,
         }
     }
 
-    /// Every tab's inputs, saved with the shown scan; the inverse of
-    /// `restore`. Structures removed since the scan leave its pair unknown.
+    /// Every tab's inputs; the inverse of `restore`. Structures removed
+    /// since the scan leave its pair unknown.
     fn session(&self) -> Session {
         let structures = &self.structures;
         let scanned = (self.twobody.scanned())
             .and_then(|[a, b]| Some([structures.index_of(a)?, structures.index_of(b)?]));
-        let settings = self.twobody.archive().map(|a| &a.settings);
+        let inputs = (self.twobody.inputs()).settings(&self.conditions, &self.forcefield);
         Session {
+            inputs: Some(inputs),
             structures: structures.files(),
             scanned,
-            estimate: settings.and_then(|s| self.conditions.estimate_for(s)),
+            estimate: self.conditions.estimate,
             run: Some(self.manybody.spec(self.conditions.protein_molarity())),
         }
     }
 
-    /// Every tab's inputs from an imported scan. A CLI scan carries no
-    /// structures, which leaves Onebody's list as it is.
-    fn restore(&mut self, settings: &ScanSettings, session: Session) {
-        self.conditions.restore(settings, &session);
-        if let Some(warning) = self.forcefield.adopt(settings) {
-            self.twobody.warn(warning);
+    /// Onebody's analysed molecule, which only the saved file shows.
+    fn extracts(&self) -> Extracts<'_> {
+        let selected = self.structures.selected();
+        let named = selected.and_then(|id| Some((id, &self.structures.get(id)?.name)));
+        let molecule = named.and_then(|(id, name)| self.onebody.extract(id, name));
+        Extracts {
+            molecules: molecule.into_iter().collect(),
         }
-        if let Some(run) = &session.run {
-            self.manybody.restore(run, self.twobody.archive());
+    }
+
+    /// What Save session writes, given `session` from [`Self::session`].
+    fn bundle<'a>(&'a self, session: &'a Session) -> BundleRef<'a> {
+        BundleRef {
+            session,
+            scan: self.twobody.archive(),
+            run: None,
         }
-        if session.structures.is_empty() {
+    }
+
+    fn save_session(&mut self) {
+        let zip = || self.bundle(&self.session()).to_zip(&self.extracts());
+        if let Err(e) = SessionFile::save(zip) {
+            self.notice = Some(format!("Save failed: {e:#}"));
+        }
+    }
+
+    /// Takes a picked session once it is read; true if one was. A scan or
+    /// run started while the browser read the file would mix with it.
+    fn poll_open(&mut self) -> bool {
+        let Some(opened) = self.file.take_opened() else {
+            return false;
+        };
+        self.notice = match opened {
+            Ok(_) if self.busy() => Some("Open ignored: a scan or run is active".into()),
+            Ok(bundle) => {
+                self.restore(bundle);
+                None
+            }
+            Err(e) => Some(format!("Open failed: {e:#}")),
+        };
+        true
+    }
+
+    /// A scan or run in progress, which an opened session would mix with.
+    fn busy(&self) -> bool {
+        !self.twobody.idle() || self.manybody.is_busy()
+    }
+
+    /// Every tab as an opened session left it. A CLI scan has no inputs, so
+    /// its settings stand in, and no structures, so Onebody's list stays.
+    fn restore(&mut self, bundle: Bundle) {
+        let Bundle { session, scan, .. } = bundle;
+        let Session {
+            inputs,
+            structures,
+            scanned,
+            estimate,
+            run,
+        } = session;
+        let from_cli = inputs.is_none();
+        self.tab = if scan.is_some() {
+            Tab::Twobody
+        } else {
+            Tab::Onebody
+        };
+        let inputs = inputs.or_else(|| scan.as_ref().map(|s| s.settings.clone()));
+        self.twobody.show_opened(scan, inputs.as_ref());
+        if let Some(inputs) = &inputs {
+            let molarity = run.as_ref().map(|r| r.molarity);
+            self.conditions.restore(inputs, estimate, molarity);
+            if let Some(warning) = self.forcefield.adopt(inputs) {
+                self.twobody.warn(warning);
+            }
+        }
+        self.manybody.restore(run.as_ref(), self.twobody.archive());
+        if from_cli {
             return;
         }
-        let ids = self.structures.replace(session.structures);
+        let ids = self.structures.replace(structures);
         // Indices were checked against the structures on load.
-        if let Some([a, b]) = session.scanned {
+        if let Some([a, b]) = scanned {
             self.twobody.select_scanned([ids[a], ids[b]]);
         }
     }
@@ -108,36 +185,49 @@ impl DuelloApp {
     }
 
     fn ui_file_menu(&mut self, ui: &mut egui::Ui) {
-        let has_scan = self.twobody.archive().is_some();
         if ui
-            .add_enabled(self.twobody.idle(), egui::Button::new("Open scan…"))
+            .add_enabled(!self.busy(), egui::Button::new("Open session…"))
             .on_hover_text(
-                "Load a .duello.zip session and restore every tab's inputs saved with it",
+                "Load a .duello.zip and restore every tab: structures, force field, \
+                 conditions, scan inputs, Manybody inputs, and the scan if one was saved",
             )
-            .on_disabled_hover_text("Not while a scan is running")
+            .on_disabled_hover_text("Not while a scan or run is active")
             .clicked()
         {
-            self.twobody.open_scan();
+            self.file.open();
         }
         if ui
-            .add_enabled(has_scan, egui::Button::new("Save scan…"))
-            .on_hover_text(
-                "Table, CG bodies and results, plus every tab's inputs (structures \
-                 and their names, force field, conditions, Manybody), as .duello.zip",
-            )
-            .on_disabled_hover_text("Run or open a scan first")
+            .button("Save session…")
+            .on_hover_ui(|ui| {
+                ui.label(self.save_tip());
+            })
             .clicked()
         {
-            let session = self.session();
-            self.twobody.export_scan(session);
+            self.save_session();
         }
         ui.separator();
+        let has_scan = self.twobody.archive().is_some();
         ui.add_enabled_ui(has_scan, |ui| {
             ui.menu_button("Export", |ui| self.twobody.export_menu(ui))
                 .response
                 .on_hover_text("The shown scan's results as plain files")
                 .on_disabled_hover_text("Run or open a scan first");
         });
+    }
+
+    /// What Save session writes now.
+    fn save_tip(&self) -> String {
+        let scan = if self.twobody.archive().is_some() {
+            "the shown scan (table, CG bodies, PMF, poses)"
+        } else {
+            "no scan yet"
+        };
+        format!(
+            "Every tab's inputs (structures, force field, conditions, scan and Manybody \
+             inputs), the analysed molecule's beads and titration, and {scan}, as \
+             .duello.zip. Keep it zipped: Safari's \"Open safe files after downloading\" \
+             unzips downloads."
+        )
     }
 
     fn ui_tab_strip(&mut self, ui: &mut egui::Ui) {
@@ -151,7 +241,7 @@ impl DuelloApp {
 
     /// Right to left: theme, GPU, then (natively) the version, which the
     /// browser shows in its HTML header instead.
-    fn ui_status(&self, ui: &mut egui::Ui) {
+    fn ui_status(&mut self, ui: &mut egui::Ui) {
         // Three small icons (System, Dark, Light), in reading order: the bar
         // lays out right to left.
         let size = egui::vec2(72.0, ui.available_height());
@@ -166,6 +256,22 @@ impl DuelloApp {
         }
         #[cfg(not(target_arch = "wasm32"))]
         crate::version::ui(ui);
+        self.ui_notice(ui);
+    }
+
+    /// Leftmost on the right: the reason the last open or save failed.
+    fn ui_notice(&mut self, ui: &mut egui::Ui) {
+        let Some(notice) = &self.notice else { return };
+        let label = egui::Label::new(egui::RichText::new(notice).color(egui::Color32::LIGHT_RED))
+            .truncate()
+            .sense(egui::Sense::click());
+        if ui
+            .add(label)
+            .on_hover_text(format!("{notice}\n\nClick to dismiss"))
+            .clicked()
+        {
+            self.notice = None;
+        }
     }
 }
 
@@ -197,16 +303,59 @@ impl eframe::App for DuelloApp {
                 .manybody
                 .ui(ui, self.twobody.archive(), &self.conditions),
         }
-        // After the tabs: a browser import lands while Twobody polls.
-        if let Some((settings, session)) = self.twobody.take_import() {
-            // The imported scan shows in Twobody; a cancelled dialog stays put.
-            self.tab = Tab::Twobody;
-            self.restore(&settings, session);
+        if self.poll_open() {
             ctx.request_repaint();
         }
         // A busy many-body tab (running, GPU setup, late frames) needs frames.
         if self.manybody.is_busy() {
             ctx.request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forcefield::{CgPolicy, Model};
+    use crate::onebody::tests::tripeptide;
+    use duello::archive::StructureFile;
+
+    /// A session saved before any scan reopens with Onebody's structures
+    /// and the inputs every tab showed.
+    #[test]
+    fn a_session_without_a_scan_restores_structures_and_inputs() {
+        let mut saved = DuelloApp::blank();
+        saved.structures.replace(vec![StructureFile {
+            name: "tri.pdb".into(),
+            contents: tripeptide(),
+        }]);
+        (saved.conditions.ph, saved.conditions.ionic_strength) = (4.5, 0.02);
+        (
+            saved.conditions.temperature,
+            saved.conditions.protein_millimolar,
+        ) = (310.0, 2.0);
+        saved.forcefield = ForceField {
+            model: Model::KimHummer,
+            cg: CgPolicy::Single,
+        };
+        let bytes = (saved.bundle(&saved.session()))
+            .to_zip(&saved.extracts())
+            .unwrap();
+
+        let mut opened = DuelloApp::blank();
+        opened.tab = Tab::Manybody;
+        opened.restore(Bundle::from_zip(&bytes).unwrap());
+        let names: Vec<_> = opened
+            .structures
+            .list()
+            .map(|(_, n)| n.to_string())
+            .collect();
+        assert_eq!(names, ["tri.pdb"]);
+        let c = &opened.conditions;
+        assert_eq!((c.ph, c.ionic_strength, c.temperature), (4.5, 0.02, 310.0));
+        assert_eq!(c.protein_millimolar, 2.0);
+        assert_eq!(opened.forcefield, saved.forcefield);
+        assert!(opened.twobody.archive().is_none());
+        assert!(opened.tab == Tab::Onebody, "no scan to show");
     }
 }

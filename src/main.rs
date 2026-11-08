@@ -7,6 +7,7 @@ mod forcefield;
 mod inputs;
 mod manybody;
 mod onebody;
+mod session_file;
 mod structures;
 #[cfg(test)]
 mod test_archive;

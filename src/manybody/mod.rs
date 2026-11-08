@@ -621,9 +621,12 @@ impl ManybodyTab {
         spec
     }
 
-    /// Inverse of `spec`, for a restored session. The concentration is the
-    /// conditions'; the MSA overrides belong to `scan`, the imported one.
-    pub fn restore(&mut self, spec: &RunSpec, scan: Option<&ScanArchive>) {
+    /// Inverse of `spec`, for an opened session; without one the inputs stay.
+    /// The concentration is the conditions'; the MSA overrides belong to
+    /// `scan`, the opened one, so follow it either way.
+    pub fn restore(&mut self, spec: Option<&RunSpec>, scan: Option<&ScanArchive>) {
+        self.msa_scan = scan.map(|archive| HsyFluid::for_scan(archive, 1.0));
+        let Some(spec) = spec else { return };
         self.n_bodies = spec.n_bodies;
         self.copies = spec.copies;
         self.detailed = !spec.centres_only;
@@ -633,7 +636,6 @@ impl ManybodyTab {
         self.tune_steps = spec.tune_steps;
         self.record_trajectory = spec.record_trajectory;
         self.msa = spec.msa;
-        self.msa_scan = scan.map(|archive| HsyFluid::for_scan(archive, 1.0));
     }
 
     /// Detailed runs set up GPU bead sums first; `poll_start` launches them.
@@ -911,7 +913,7 @@ mod tests {
         };
         for spec in [detailed, centres] {
             let mut tab = ManybodyTab::default();
-            tab.restore(&spec, None);
+            tab.restore(Some(&spec), None);
             assert_eq!(tab.spec(0.004), spec);
         }
     }

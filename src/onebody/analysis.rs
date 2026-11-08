@@ -11,6 +11,7 @@ use crate::conditions::SolutionConditions;
 use crate::forcefield::ForceField;
 use crate::structures::StructureId;
 use duello::archive::{CgBody, StructureFile};
+use duello::bundle::MoleculeExtract;
 use duello::molecule::{Curve, Molecule, MoleculeSpec, Step, Titrating};
 use duello::system::TITRATION_SWEEPS;
 use std::hash::{Hash, Hasher};
@@ -138,6 +139,26 @@ impl MoleculeView {
     /// The titrated body; while conditions re-titrate, the last one.
     pub fn body(&self) -> Option<&CgBody> {
         self.shown.as_ref().map(|(_, m)| &m.body)
+    }
+
+    /// The shown molecule for a saved session, if titrated from structure
+    /// `id`: it lags a selection made while Onebody was hidden. The curve
+    /// only once complete, and only if it is this molecule's.
+    pub fn extract<'a>(&'a self, id: StructureId, name: &'a str) -> Option<MoleculeExtract<'a>> {
+        let (key, molecule) = self.shown.as_ref()?;
+        // An id's contents never change, so its cached hash identifies it.
+        if self.hashed != Some((id, key.contents)) {
+            return None;
+        }
+        let curve = (self.curve.as_ref())
+            .filter(|(k, c)| *k == key.curve() && c.is_done())
+            .map(|(_, c)| c);
+        Some(MoleculeExtract {
+            name,
+            ph: key.ph,
+            molecule,
+            curve,
+        })
     }
 
     pub fn ui_pane(&mut self, ui: &mut egui::Ui, pane: Pane) {
@@ -344,5 +365,27 @@ mod tests {
         assert_eq!(net_charge(&view), at_7, "held while dragging");
         finish(&mut view, &file("a"), &acidic);
         assert!(net_charge(&view) - at_7 > 0.8);
+    }
+
+    /// A save takes the molecule as shown, and its curve only once complete.
+    #[test]
+    fn extract_is_the_shown_molecule_with_a_finished_curve() {
+        let mut view = MoleculeView::default();
+        let (id, other) = (StructureId::for_tests(0), StructureId::for_tests(1));
+        assert!(view.extract(id, "a").is_none(), "nothing titrated yet");
+        let mut conditions = SolutionConditions::default();
+        conditions.ph = 4.5;
+        let ff = ForceField::default();
+        while view.body().is_none() {
+            view.tick(Some((id, &file("a"))), &ff, &conditions, true);
+        }
+        let extract = view.extract(id, "a").unwrap();
+        assert_eq!((extract.name, extract.ph), ("a", 4.5));
+        assert!(view.extract(other, "b").is_none(), "not what was titrated");
+        assert!(extract.curve.is_none(), "curve still titrating");
+
+        finish(&mut view, &file("a"), &conditions);
+        let curve = view.extract(id, "a").unwrap().curve.unwrap();
+        assert_eq!(curve.points().len(), 21, "pH 2–12 every 0.5");
     }
 }

@@ -1,7 +1,7 @@
 //! The solution every tab works in; set in Onebody, read elsewhere.
 
 use crate::widgets::{grid, row};
-use duello::archive::{CgBody, FreeSaltEstimate, Session};
+use duello::archive::{CgBody, FreeSaltEstimate};
 use duello::nbody::HsyFluid;
 use duello::solution::{free_salt, protein_volume, FreeSalt};
 use duello::web_api::ScanSettings;
@@ -80,25 +80,22 @@ impl SolutionConditions {
         self.protein_millimolar * 1e-3
     }
 
-    /// Everything a saved session knows of the solution: the scan's
-    /// conditions, its estimate, and the protein concentration Manybody's
-    /// inputs held at export.
-    pub fn restore(&mut self, settings: &ScanSettings, session: &Session) {
-        self.adopt(settings);
-        self.estimate = session.estimate;
-        if let Some(e) = session.estimate {
+    /// Everything a saved session knows of the solution: `inputs`' conditions,
+    /// the estimate, and the protein `molarity` (mol/L) Manybody's inputs held.
+    pub fn restore(
+        &mut self,
+        inputs: &ScanSettings,
+        estimate: Option<FreeSaltEstimate>,
+        molarity: Option<f64>,
+    ) {
+        self.adopt(inputs);
+        self.estimate = estimate;
+        if let Some(e) = estimate {
             self.estimator.reservoir = e.reservoir;
         }
-        if let Some(run) = &session.run {
-            self.protein_millimolar = run.molarity * 1e3;
+        if let Some(molarity) = molarity {
+            self.protein_millimolar = molarity * 1e3;
         }
-    }
-
-    /// The estimate to save with a scan: only if it set the ionic strength
-    /// the scan was made at.
-    pub fn estimate_for(&self, settings: &ScanSettings) -> Option<FreeSaltEstimate> {
-        self.estimate
-            .filter(|_| same(settings.ionic_strength, self.ionic_strength))
     }
 
     /// Why a scan no longer reflects these conditions, if it doesn't.

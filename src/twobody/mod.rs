@@ -4,8 +4,6 @@ mod poses;
 mod thermo;
 use crate::compute::{ComputeResult, ComputeStatus};
 use crate::conditions::SolutionConditions;
-#[cfg(target_arch = "wasm32")]
-use crate::files::download_bytes_as_file;
 use crate::files::save_file;
 use crate::forcefield::ForceField;
 use crate::inputs::ScanInputs;
@@ -14,8 +12,7 @@ use crate::transport::{Action, Phase, Transport};
 use crate::widgets::{placeholder, section};
 use crate::windows;
 use curves::{Curves, Shown};
-use duello::archive::{Session, StructureFile};
-use duello::bundle::{Bundle, BundleRef};
+use duello::archive::{ScanArchive, StructureFile};
 use duello::web_api::{ScanProgress, ScanSettings};
 use duello::Subdivision;
 use pane::Pane;
@@ -48,16 +45,14 @@ const TRANSPORT: Transport = Transport {
 };
 
 /// Two-body scan of a pair picked from Onebody's structures: inputs, the
-/// scan's lifecycle, import/export and the PMF plot.
+/// scan's lifecycle, exports and the PMF plot.
 pub struct TwobodyTab {
     inputs: ScanInputs,
     /// Molecules 1 and 2; the same entry twice is a homo-dimer.
     selected: [Option<StructureId>; 2],
     /// The pair the shown result was scanned from, for export; None when
-    /// unknown, e.g. imported from the CLI.
+    /// unknown, e.g. opened from a CLI scan.
     scanned: Option<[StructureId; 2]>,
-    /// A scan just imported, until the app restores its session.
-    imported: Option<(ScanSettings, Session)>,
     status: ComputeStatus,
     result: Option<ComputeResult>,
     /// Streamed while a scan runs, then replaced by the result's.
@@ -73,8 +68,6 @@ pub struct TwobodyTab {
     /// Set by Stop. One per scan, so a new scan can't un-cancel an abandoned one
     /// that has yet to reach its next R-bin.
     cancel_flag: Arc<AtomicBool>,
-    /// Bytes of a scan archive picked for import.
-    import_rx: Option<mpsc::Receiver<Vec<u8>>>,
 }
 
 impl TwobodyTab {
@@ -92,7 +85,6 @@ impl TwobodyTab {
             inputs: ScanInputs::default(),
             selected: [None; 2],
             scanned: None,
-            imported: None,
             status: ComputeStatus::Idle,
             result: None,
             curves: None,
@@ -103,7 +95,6 @@ impl TwobodyTab {
             result_rx: None,
             progress_rx: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
-            import_rx: None,
         }
     }
 
@@ -117,19 +108,35 @@ impl TwobodyTab {
     pub fn poll(&mut self, ctx: &egui::Context) {
         self.poll_result();
         self.poll_progress();
-        self.poll_import();
         if matches!(self.status, ComputeStatus::Running { .. }) {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
     }
 
-    /// A scan just imported, once: its settings and saved session, for
-    /// the app to restore into every tab.
-    pub fn take_import(&mut self) -> Option<(ScanSettings, Session)> {
-        self.imported.take()
+    /// Shows an opened session's scan, or none, with the panel set to the
+    /// tabs' inputs it was saved with.
+    pub fn show_opened(&mut self, scan: Option<ScanArchive>, inputs: Option<&ScanSettings>) {
+        self.error = None;
+        self.scanned = None;
+        if let Some(inputs) = inputs {
+            self.inputs = ScanInputs::from_settings(inputs);
+        }
+        match scan {
+            Some(scan) => self.install_result(scan),
+            None => {
+                self.result = None;
+                self.curves = None;
+                self.poses.invalidate();
+            }
+        }
     }
 
-    /// Shown in the panel, e.g. why an import couldn't restore everything.
+    /// The scan parameters in the panel.
+    pub fn inputs(&self) -> &ScanInputs {
+        &self.inputs
+    }
+
+    /// Shown in the panel, e.g. why an opened session couldn't restore everything.
     pub fn warn(&mut self, message: String) {
         self.error = Some(message);
     }
@@ -580,105 +587,10 @@ impl TwobodyTab {
         }
     }
 
-    /// The pair the shown result was scanned from, if known.
+    /// The pair the shown result was scanned from, if known; a running scan
+    /// already names its pair, but shows no result yet.
     pub fn scanned(&self) -> Option<[StructureId; 2]> {
-        self.scanned
-    }
-
-    /// Writes the shown scan with `session`, every tab's inputs. Native
-    /// asks for the path first: serializing the table can take a while, and
-    /// is wasted if the dialog is cancelled.
-    pub fn export_scan(&mut self, session: Session) {
-        let Some(result) = &self.result else {
-            return;
-        };
-        const NAME: &str = "scan.duello.zip";
-        #[cfg(not(target_arch = "wasm32"))]
-        let Some(path) = rfd::FileDialog::new().set_file_name(NAME).save_file() else {
-            return;
-        };
-        let bundle = BundleRef {
-            session: &session,
-            scan: Some(result),
-            run: None,
-        };
-        let bytes = match bundle.to_zip(&Default::default()) {
-            Ok(bytes) => bytes,
-            Err(e) => return self.error = Some(format!("Export failed: {e:#}")),
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Err(e) = std::fs::write(&path, bytes) {
-            self.error = Some(format!("Export failed: {e}"));
-        }
-        #[cfg(target_arch = "wasm32")]
-        download_bytes_as_file(&bytes, NAME);
-    }
-
-    /// File ▸ Open: picks a `.duello.zip` and imports it.
-    pub fn open_scan(&mut self) {
-        // `duello` too, so an old file gets the re-run message instead of being hidden.
-        const FILTER: (&str, &[&str]) = ("Duello session", &["zip", "duello"]);
-        // Native: a blocking dialog, so no channel is needed.
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter(FILTER.0, FILTER.1)
-            .pick_file()
-        {
-            match std::fs::read(&path) {
-                Ok(bytes) => self.import_scan(&bytes),
-                Err(e) => self.error = Some(format!("Import failed: {e}")),
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let (tx, rx) = mpsc::channel();
-            self.import_rx = Some(rx);
-            wasm_bindgen_futures::spawn_local(async move {
-                let dialog = rfd::AsyncFileDialog::new().add_filter(FILTER.0, FILTER.1);
-                if let Some(file) = dialog.pick_file().await {
-                    let _ = tx.send(file.read().await);
-                }
-            });
-        }
-    }
-
-    /// WASM reads the picked file asynchronously; a cancelled dialog drops the sender.
-    fn poll_import(&mut self) {
-        let Some(received) = self.import_rx.as_ref().map(|rx| rx.try_recv()) else {
-            return;
-        };
-        match received {
-            Ok(bytes) => {
-                self.import_rx = None;
-                self.import_scan(&bytes);
-            }
-            Err(mpsc::TryRecvError::Disconnected) => self.import_rx = None,
-            Err(mpsc::TryRecvError::Empty) => {}
-        }
-    }
-
-    /// Replaces the shown result and inputs with the imported scan's; its
-    /// solution and session reach the other tabs via `take_import`.
-    fn import_scan(&mut self, bytes: &[u8]) {
-        // A running scan streams into `curves`; an import would mix into it.
-        if !self.idle() {
-            self.error = Some("Import ignored: a scan is running".into());
-            return;
-        }
-        let (session, result) = match Bundle::from_zip(bytes) {
-            Ok(Bundle {
-                session,
-                scan: Some(scan),
-                ..
-            }) => (session, scan),
-            Ok(_) => return self.error = Some("Import failed: the session holds no scan".into()),
-            Err(e) => return self.error = Some(format!("Import failed: {e:#}")),
-        };
-        self.error = None;
-        self.inputs = ScanInputs::from_settings(&result.settings);
-        self.imported = Some((result.settings.clone(), session));
-        self.scanned = None;
-        self.install_result(result);
+        self.result.as_ref().and(self.scanned)
     }
 
     fn download_csv(&self) {

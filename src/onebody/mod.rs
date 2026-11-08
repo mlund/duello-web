@@ -3,11 +3,13 @@
 
 use crate::conditions::SolutionConditions;
 use crate::forcefield::ForceField;
+use crate::structures::StructureId;
 use crate::structures::Structures;
 use crate::widgets::section;
 use crate::windows::{self, Slot};
 use analysis::MoleculeView;
 use duello::archive::CgBody;
+use duello::bundle::MoleculeExtract;
 
 mod analysis;
 mod panes;
@@ -52,6 +54,11 @@ impl OnebodyTab {
                 windows::show(ui, pane, |ui| self.view.ui_pane(ui, pane));
             }
         });
+    }
+
+    /// The analysed molecule for a saved session, if it is structure `id`.
+    pub fn extract<'a>(&'a self, id: StructureId, name: &'a str) -> Option<MoleculeExtract<'a>> {
+        self.view.extract(id, name)
     }
 
     fn ui_inputs(

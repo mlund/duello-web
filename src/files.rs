@@ -2,12 +2,22 @@
 
 /// Native: a save dialog (cancel is not an error). Browser: a download.
 pub fn save_file(content: &[u8], filename: &str) -> std::io::Result<()> {
+    save_with(filename, || Ok(content.to_vec())).map_err(std::io::Error::other)
+}
+
+/// As [`save_file`], but builds the content only once natively a path is
+/// picked: slow content is then not wasted on a cancelled dialog.
+pub fn save_with(
+    filename: &str,
+    content: impl FnOnce() -> anyhow::Result<Vec<u8>>,
+) -> anyhow::Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(path) = rfd::FileDialog::new().set_file_name(filename).save_file() {
-        std::fs::write(path, content)?;
+        use anyhow::Context;
+        std::fs::write(&path, content()?).with_context(|| format!("writing {}", path.display()))?;
     }
     #[cfg(target_arch = "wasm32")]
-    download_bytes_as_file(content, filename);
+    download_bytes_as_file(&content()?, filename);
     Ok(())
 }
 
