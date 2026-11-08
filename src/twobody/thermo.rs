@@ -13,7 +13,7 @@ pub fn thermodynamics(ui: &mut egui::Ui, archive: &ScanArchive) {
     grid("twobody_thermo").striped(true).show(ui, |ui| {
         virial_rows(ui, archive);
         if let Some(association) = Association::new(&archive.virial, &archive.points) {
-            association_rows(ui, &association);
+            association_rows(ui, &association, archive.settings.temperature);
         }
     });
 }
@@ -116,8 +116,9 @@ fn opening_row(ui: &mut egui::Ui, weight: Option<f64>) {
 }
 
 /// Shown only where K_a > 0, i.e. net attraction beyond the hard-bead reference.
-fn association_rows(ui: &mut egui::Ui, association: &Association) {
+fn association_rows(ui: &mut egui::Ui, association: &Association, temperature: f64) {
     let standard = "Standard state 1 M.";
+    let molar = association.molar(temperature);
     rows(
         ui,
         &[
@@ -131,18 +132,21 @@ fn association_rows(ui: &mut egui::Ui, association: &Association) {
             ),
             (
                 "ΔA°",
-                format!("Association free energy, −ln(K_a·1 M). {standard}"),
-                format!("{:.2} kT", association.delta_a()),
+                format!("Association free energy, −kT·ln(K_a·1 M). {standard}"),
+                format!("{:.2} kJ/mol", molar.delta_a),
             ),
             (
                 "ΔU°",
                 format!("Association energy, −∂ln K_a/∂(1/kT). {standard} {FIXED_POTENTIAL}"),
-                format!("{:.2} kT", association.delta_u),
+                format!("{:.2} kJ/mol", molar.delta_u),
             ),
             (
-                "−TΔS°",
-                format!("Entropic part, ΔA° − ΔU°. {standard} {FIXED_POTENTIAL}"),
-                format!("{:.2} kT", association.minus_t_delta_s()),
+                "ΔS°",
+                format!(
+                    "Association entropy, (ΔU° − ΔA°)/T at {temperature:.2} K. \
+                     {standard} {FIXED_POTENTIAL}"
+                ),
+                format!("{:.1} J/(K·mol)", molar.delta_s),
             ),
         ],
     );
