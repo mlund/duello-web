@@ -134,10 +134,12 @@ impl Quantity {
 pub fn titration(
     ui: &mut egui::Ui,
     quantity: &mut Quantity,
+    reset: &mut bool,
     ideal: &[CurvePoint],
     mc: &[CurvePoint],
     ph: f64,
 ) {
+    let before = *quantity;
     crate::widgets::pick(
         ui,
         "titration_quantity",
@@ -147,15 +149,18 @@ pub fn titration(
         Some(Quantity::tooltip),
     )
     .on_hover_text("What to plot over pH");
+    // Quantities differ by orders of magnitude, so old axes would hide the new curve.
+    *reset |= *quantity != before;
     let q = *quantity;
     let series =
         |curve: &[CurvePoint]| -> Vec<[f64; 2]> { curve.iter().map(|p| [p.ph, q.of(p)]).collect() };
     let (mc, ideal) = (series(mc), series(ideal));
     let marker = ui.visuals().weak_text_color();
-    Plot::new("titration_curve")
+    let plot = Plot::new("titration_curve")
         .legend(crate::widgets::curve_legend())
         .x_axis_label("pH")
-        .y_axis_label(q.axis())
+        .y_axis_label(q.axis());
+    crate::widgets::refit(plot, reset)
         .show(ui, |plot| {
             plot.line(Line::new("Monte Carlo", PlotPoints::from(mc.clone())));
             plot.points(Points::new("Monte Carlo", PlotPoints::from(mc)).radius(2.5));

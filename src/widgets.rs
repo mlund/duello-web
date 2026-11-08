@@ -51,6 +51,16 @@ pub fn curve_legend() -> egui_plot::Legend {
     egui_plot::Legend::default().position(egui_plot::Corner::RightBottom)
 }
 
+/// Refits `plot` to its data when `reset` is set, then clears it. Only then:
+/// auto-bounds follows growing curves in between, so the user can still pan.
+pub fn refit<'a>(plot: egui_plot::Plot<'a>, reset: &mut bool) -> egui_plot::Plot<'a> {
+    if std::mem::take(reset) {
+        plot.reset()
+    } else {
+        plot
+    }
+}
+
 /// The tabs' main curve colour, so their plots read alike.
 pub fn curve_color(dark_mode: bool) -> egui::Color32 {
     if dark_mode {

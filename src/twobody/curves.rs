@@ -1,6 +1,6 @@
 //! The Free energy window: curves against R, streamed while a scan runs.
 
-use crate::widgets::{curve_color, curve_legend, pick};
+use crate::widgets::{curve_color, curve_legend, pick, refit};
 use duello::archive::ScanArchive;
 use duello::web_api::PmfPoint;
 use duello::VirialCoeff;
@@ -152,16 +152,11 @@ impl Curves {
         });
         // Other units, so the old axes would hide the new curve.
         self.reset |= *shown != before;
-        let mut plot = Plot::new("pmf_plot")
+        let plot = Plot::new("pmf_plot")
             .legend(curve_legend())
-            .auto_bounds(egui::Vec2b::TRUE)
             .x_axis_label("Mass-centre separation, R (Å)")
             .y_axis_label(shown.y_label());
-        // Only on these events; auto_bounds follows a growing curve in between,
-        // so the user can still zoom while a scan runs.
-        if std::mem::take(&mut self.reset) {
-            plot = plot.reset();
-        }
+        let plot = refit(plot, &mut self.reset);
         let series = self.series(*shown);
         plot.show(ui, |plot_ui| {
             for (name, data, colour, shape) in series {

@@ -72,6 +72,8 @@ pub struct MoleculeView {
     /// current-pH titration is done.
     curve: Option<(Key, Curve)>,
     quantity: Quantity,
+    /// Refit the titration axes next frame: a new molecule, curve or quantity.
+    reset: bool,
     sweeps_per_frame: u64,
     /// Contents hash of the last structure seen; an id's contents never change.
     hashed: Option<(StructureId, u64)>,
@@ -89,6 +91,7 @@ impl Default for MoleculeView {
             error: None,
             curve: None,
             quantity: Quantity::Charge,
+            reset: true,
             sweeps_per_frame: FIRST_SWEEPS,
             hashed: None,
             scene: MoleculeScene::default(),
@@ -174,7 +177,7 @@ impl MoleculeView {
                     .curve
                     .as_ref()
                     .map_or((&[][..], &[][..]), |(_, c)| (c.ideal(), c.points()));
-                panes::titration(ui, &mut self.quantity, ideal, mc, key.ph);
+                panes::titration(ui, &mut self.quantity, &mut self.reset, ideal, mc, key.ph);
             }
             // Screened as titrated, so charges and screening agree.
             Pane::Viewer => {
@@ -264,6 +267,7 @@ impl MoleculeView {
             return Ok(());
         }
         self.curve = None;
+        self.reset = true;
         let (mc, ideal) = (ph_grid(MC_CURVE_STEPS), ph_grid(IDEAL_STEPS));
         self.curve = Some((key.curve(), Curve::start(pdb, spec, &mc, &ideal, SEED)?));
         Ok(())
