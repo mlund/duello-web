@@ -8,6 +8,8 @@ use duello::Subdivision;
 #[derive(Clone)]
 pub struct ScanInputs {
     pub rmin: f64,
+    /// Let the scan choose `rmin` from bead overlap; the scan writes back what it used.
+    pub rmin_auto: bool,
     pub rmax: f64,
     pub dr: f64,
     pub max_ndiv: usize,
@@ -29,6 +31,7 @@ impl ScanInputs {
             model: forcefield.model.name().to_string(),
             single_bead: forcefield.single_bead(),
             rmin: self.rmin,
+            rmin_auto: self.rmin_auto,
             rmax: self.rmax,
             dr: self.dr,
             ionic_strength: conditions.ionic_strength,
@@ -47,6 +50,7 @@ impl ScanInputs {
     pub fn from_settings(s: &ScanSettings) -> Self {
         Self {
             rmin: s.rmin,
+            rmin_auto: s.rmin_auto,
             rmax: s.rmax,
             dr: s.dr,
             max_ndiv: s.max_ndiv,
@@ -62,6 +66,7 @@ impl Default for ScanInputs {
     fn default() -> Self {
         Self {
             rmin: 26.0,
+            rmin_auto: true,
             rmax: 60.0,
             dr: 1.0,
             max_ndiv: 2,

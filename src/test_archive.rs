@@ -32,6 +32,7 @@ fn settings() -> ScanSettings {
         model: "test".into(),
         single_bead: true,
         rmin: 5.0,
+        rmin_auto: false,
         rmax: 8.0,
         dr: 1.0,
         ionic_strength: 0.1,

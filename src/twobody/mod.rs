@@ -9,7 +9,7 @@ use crate::forcefield::ForceField;
 use crate::inputs::ScanInputs;
 use crate::structures::{StructureId, Structures};
 use crate::transport::{Action, Phase, Transport};
-use crate::widgets::{placeholder, section};
+use crate::widgets::{placeholder, row, section};
 use crate::windows;
 use curves::{Curves, Shown};
 use duello::archive::{ScanArchive, StructureFile};
@@ -233,22 +233,8 @@ impl TwobodyTab {
             .num_columns(2)
             .spacing([8.0, 4.0])
             .show(ui, |ui| {
-                ui.label("R");
-                ui.add(
-                    egui::RangeSlider::new(&mut self.inputs.rmin, &mut self.inputs.rmax, R_SLIDER)
-                        .min_separation(1.0)
-                        .clamping(egui::SliderClamping::Never)
-                        .suffix(" \u{00C5}"),
-                )
-                .on_hover_text(
-                    "Sampled mass-centre separations. Below the lower end we assume \
-                    infinite repulsion in the osmotic second virial coefficient, \
-                    B\u{2082}, which directly affects the reduced virial coefficient, so \
-                    pay attention when comparing with experiment or other models. \
-                    Beyond the upper end the tail is fitted. Type a value to go past \
-                    the slider's ends.",
-                );
-                ui.end_row();
+                self.ui_rmin_auto(ui);
+                self.ui_r_range(ui);
 
                 ui.label("\u{0394}R");
                 ui.add(
@@ -335,7 +321,7 @@ impl TwobodyTab {
             Some(NO_GPU)
         } else if self.pair(structures).is_none() {
             Some("Pick both molecules from Onebody's structures")
-        } else if self.inputs.rmin >= self.inputs.rmax {
+        } else if !self.inputs.rmin_auto && self.inputs.rmin >= self.inputs.rmax {
             Some("The R range must have a lower end below its upper end")
         } else if self.inputs.dr <= 0.0 {
             Some("\u{0394}R must be positive")
@@ -529,8 +515,59 @@ impl TwobodyTab {
         self.curves = None;
     }
 
+    /// Auto R_min needs the coarse-grained bodies, so it is settled at scan start.
+    fn ui_rmin_auto(&mut self, ui: &mut egui::Ui) {
+        let tip = format!(
+            "R_min from where every orientation of the two bead sets overlaps (radii × \
+             {}, for soft beads), chosen when the scan starts. Turn off to set it by hand; \
+             the e^(−w/kT) at σ row checks the choice after the scan.",
+            duello::steric::CORE_RADIUS_SCALE
+        );
+        let inputs = &mut self.inputs;
+        // install_result writes the scanned value back while Auto is on.
+        let note = match self.result.is_some() {
+            true => format!("at scan start (last scan: {:.1} \u{00C5})", inputs.rmin),
+            false => "at scan start".into(),
+        };
+        row(ui, "R_min", &tip, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut inputs.rmin_auto, "Auto");
+                if inputs.rmin_auto {
+                    ui.weak(note);
+                }
+            })
+            .response
+        });
+    }
+
+    /// Both ends by hand, or only R_max while R_min is automatic.
+    fn ui_r_range(&mut self, ui: &mut egui::Ui) {
+        let tip = "Sampled mass-centre separations. Below the lower end we assume \
+                   infinite repulsion in the osmotic second virial coefficient, \
+                   B\u{2082}. Beyond the upper end the tail is fitted. Type a value to go \
+                   past the slider's ends.";
+        let inputs = &mut self.inputs;
+        let label = if inputs.rmin_auto { "R_max" } else { "R" };
+        row(ui, label, tip, |ui| match inputs.rmin_auto {
+            true => ui.add(
+                egui::Slider::new(&mut inputs.rmax, R_SLIDER)
+                    .clamping(egui::SliderClamping::Never)
+                    .suffix(" \u{00C5}"),
+            ),
+            false => ui.add(
+                egui::RangeSlider::new(&mut inputs.rmin, &mut inputs.rmax, R_SLIDER)
+                    .min_separation(1.0)
+                    .clamping(egui::SliderClamping::Never)
+                    .suffix(" \u{00C5}"),
+            ),
+        });
+    }
+
     /// Shared by finished scans and imports, so both show a result the same way.
     fn install_result(&mut self, result: ComputeResult) {
+        if self.inputs.rmin_auto {
+            self.inputs.rmin = result.settings.rmin;
+        }
         self.curves.get_or_insert_with(Curves::new).finish(&result);
         self.result = Some(result);
         self.poses.invalidate();
