@@ -1,21 +1,22 @@
 //! Run statistics and the downloads of what the run produced.
 
+use super::results::Results;
 use super::RunInfo;
 use crate::files::save_file;
 use crate::widgets::{grid, row};
-use duello::nbody::{box_length, NBodyRun, Progress, RunStats, Stage};
+use duello::nbody::{box_length, Progress, RunStats, Stage};
 use std::borrow::Cow;
 
 /// A download's outcome goes to `error`: set on failure, cleared on success.
 pub fn show(
     ui: &mut egui::Ui,
-    run: &NBodyRun,
+    results: Results,
     progress: Progress,
     info: RunInfo,
     error: &mut Option<String>,
 ) {
     grid("mc_stats").striped(true).show(ui, |ui| {
-        let stats = run.stats();
+        let stats = results.stats();
         run_rows(ui, progress);
         energy_rows(ui, &stats, progress, info);
         move_rows(ui, &stats, progress, info);
@@ -27,7 +28,7 @@ pub fn show(
             "Trajectory reached its size cap; recording stopped",
         );
     }
-    match downloads(ui, run, progress, info) {
+    match downloads(ui, results, progress) {
         Some(Err(e)) => *error = Some(format!("Save failed: {e:#}")),
         Some(Ok(())) => *error = None,
         None => {}
@@ -196,11 +197,11 @@ enum Download {
 /// `Some` when a download was asked for: whether saving it worked.
 fn downloads(
     ui: &mut egui::Ui,
-    run: &NBodyRun,
+    results: Results,
     progress: Progress,
-    info: RunInfo,
 ) -> Option<anyhow::Result<()>> {
     const NO_FRAMES: &str = "Available once production frames exist";
+    let trajectory = results.trajectory();
     let mut pick = None;
     ui.horizontal(|ui| {
         let mut button = |enabled: bool, label: &str, hover: &str, why_not: &str, kind| {
@@ -228,25 +229,30 @@ fn downloads(
             Download::PairCorrelation,
         );
         button(
-            info.record_trajectory,
+            trajectory.is_some(),
             "Trajectory (.traj)",
             "Production frames: positions and orientations",
-            "Recording was off for this run: tick Record trajectory and run again",
+            "Not recorded, or not saved with the opened session: tick Record \
+             trajectory and run again",
             Download::Trajectory,
         );
     });
-    Some(save(run, pick?))
+    Some(save(results, trajectory, pick?))
 }
 
-fn save(run: &NBodyRun, kind: Download) -> anyhow::Result<()> {
+/// `trajectory` is `results`', fetched already to gate its button.
+fn save(results: Results, trajectory: Option<Cow<[u8]>>, kind: Download) -> anyhow::Result<()> {
     // Cow: the trajectory can be large, so it is saved without a copy.
     let (bytes, name): (Cow<[u8]>, _) = match kind {
-        Download::Curve => (run.report_csv().into_bytes().into(), "manybody.csv"),
+        Download::Curve => (results.report_csv().into_bytes().into(), "manybody.csv"),
         Download::PairCorrelation => {
-            let csv = run.pair_correlation().to_csv();
+            let csv = results.rdf().to_csv();
             (csv.into_bytes().into(), "manybody.rdf.csv")
         }
-        Download::Trajectory => (run.trajectory_bytes()?, "manybody.traj"),
+        Download::Trajectory => match trajectory {
+            Some(bytes) => (bytes, "manybody.traj"),
+            None => anyhow::bail!("no trajectory to save"),
+        },
     };
     Ok(save_file(&bytes, name)?)
 }

@@ -5,6 +5,7 @@
 
 mod pane;
 mod plots;
+mod results;
 mod scene;
 mod stats;
 
@@ -14,11 +15,13 @@ use crate::widgets::{grid, placeholder, set_in_onebody};
 use crate::windows;
 use duello::archive::{CgBody, ScanArchive};
 use duello::nbody::{
-    box_length, Device, HsyFluid, MsaOverrides, NBodyRun, Progress, RunSpec, Scattering, Stage,
-    RESIDUE_FORM_FACTORS,
+    box_length, Device, HsyFluid, MsaOverrides, NBodyRun, Progress, RunRecord, RunSpec, Scattering,
+    Stage, RESIDUE_FORM_FACTORS,
 };
 use duello::solution::PARTIAL_SPECIFIC_VOLUME;
 use pane::Pane;
+pub use results::Opened;
+use results::Results;
 use std::future::Future;
 use std::sync::mpsc;
 
@@ -53,6 +56,9 @@ pub struct ManybodyTab {
     /// Last (sphere, q_min) checked for an MSA solution, and the answer.
     msa_check: Option<(HsyFluid, f64, bool)>,
     run: Option<NBodyRun>,
+    /// A run opened from a session; never alongside `run`. The panes read
+    /// either through [`Results`].
+    opened: Option<Opened>,
     /// GPU setup for a detailed run, which the browser can't block on.
     starting: Option<Starting>,
     /// Bead sums still out on the GPU, so the curve has frames to come.
@@ -98,6 +104,21 @@ struct RunInfo {
     record_trajectory: bool,
 }
 
+impl RunInfo {
+    /// `ionic_strength` (mol/L) is the scan's; the spec doesn't hold it.
+    fn new(spec: &RunSpec, ionic_strength: f64) -> Self {
+        Self {
+            n_bodies: spec.n_bodies,
+            copies: spec.copies,
+            millimolar: spec.molarity * 1e3,
+            ionic_millimolar: ionic_strength * 1e3,
+            detailed: !spec.centres_only,
+            tune_steps: spec.tune_steps,
+            record_trajectory: spec.record_trajectory,
+        }
+    }
+}
+
 impl Default for ManybodyTab {
     fn default() -> Self {
         let defaults = RunSpec::new(1, 1.0);
@@ -115,6 +136,7 @@ impl Default for ManybodyTab {
             msa_error: None,
             msa_check: None,
             run: None,
+            opened: None,
             starting: None,
             unsettled: false,
             gpu_note: None,
@@ -185,10 +207,10 @@ impl ManybodyTab {
     }
 
     fn ui_energy(&mut self, ui: &mut egui::Ui) {
-        let Some(run) = &self.run else {
+        let Some(results) = Results::of(&self.run, &self.opened) else {
             return placeholder(ui, "Start a run to see the energy trace.");
         };
-        let trace = run.energy_trace();
+        let trace = results.energy();
         if trace.is_empty() {
             return placeholder(
                 ui,
@@ -196,7 +218,8 @@ impl ManybodyTab {
             );
         }
         // A restarted trace (production) gets a fresh, following view.
-        let key = (self.run_id, run.energy_trace_epoch());
+        let epoch = self.run.as_ref().map_or(0, |r| r.energy_trace_epoch());
+        let key = (self.run_id, epoch);
         if self.energy_key != Some(key) {
             self.energy_key = Some(key);
             self.follow_energy = true;
@@ -205,10 +228,15 @@ impl ManybodyTab {
     }
 
     fn ui_scattering_pane(&mut self, ui: &mut egui::Ui) {
-        let Some(run) = self.produced_run(ui, "S(q)") else {
+        let Some(results) = produced(
+            ui,
+            Results::of(&self.run, &self.opened),
+            self.progress,
+            "S(q)",
+        ) else {
             return;
         };
-        let curve = run.curve();
+        let curve = results.curve();
         if curve.frames == 0 {
             return placeholder(ui, "Waiting for the first frames from the GPU.");
         }
@@ -218,28 +246,55 @@ impl ManybodyTab {
     }
 
     fn ui_pair_correlation(&mut self, ui: &mut egui::Ui) {
-        if let Some(run) = self.produced_run(ui, "g(r)") {
-            plots::pair_correlation(ui, &run.pair_correlation(), self.run_id);
+        if let Some(results) = produced(
+            ui,
+            Results::of(&self.run, &self.opened),
+            self.progress,
+            "g(r)",
+        ) {
+            plots::pair_correlation(ui, &results.rdf(), self.run_id);
         }
     }
 
-    /// The run once it has production frames; until then a placeholder
-    /// saying what `what` waits for.
-    fn produced_run(&self, ui: &mut egui::Ui, what: &str) -> Option<&NBodyRun> {
-        let Some(run) = &self.run else {
-            placeholder(ui, &format!("Start a run to see {what}."));
-            return None;
-        };
-        if self.progress.is_none_or(|p| p.frames == 0) {
-            placeholder(ui, "No production frames yet.");
-            return None;
-        }
-        Some(run)
+    /// The live run's, else the opened one's; what Save session writes.
+    pub fn results(&self) -> Option<Results<'_>> {
+        Results::of(&self.run, &self.opened)
+    }
+
+    /// What Save session takes from this tab beyond its inputs, if anything.
+    pub fn saved_results(&self) -> Option<&'static str> {
+        let trajectory = self.results()?.trajectory().is_some();
+        Some(if trajectory {
+            "the Manybody run's curves, statistics and trajectory"
+        } else {
+            "the Manybody run's curves and statistics"
+        })
+    }
+
+    /// Replaces any run with an opened session's, or none; the inputs are
+    /// `restore`'s.
+    pub fn show_opened(&mut self, opened: Option<Opened>) {
+        (self.run, self.starting) = (None, None);
+        (self.running, self.unsettled) = (false, false);
+        (self.error, self.gpu_note) = (None, None);
+        self.run_id += 1;
+        self.viewer.reset();
+        self.follow_energy = true;
+        let record = opened.as_ref().map(|o| &o.record);
+        self.progress = record.map(RunRecord::final_progress);
+        self.run_info = record.map(|r| RunInfo::new(&r.spec, r.ionic_strength));
+        self.opened = opened;
     }
 
     /// Runs only while the pane is expanded (see `windows::show`), and
     /// rebuilds the scene only when the shown configuration changes.
     fn ui_simulation(&mut self, ui: &mut egui::Ui) {
+        if self.opened.is_some() {
+            return placeholder(
+                ui,
+                "A run opened from file keeps no box; Run starts a new one.",
+            );
+        }
         let (Some(run), Some(info)) = (&self.run, self.run_info) else {
             return placeholder(ui, "Start a run to see the box.");
         };
@@ -259,16 +314,15 @@ impl ManybodyTab {
     }
 
     fn ui_stats(&mut self, ui: &mut egui::Ui) {
-        if self.run.is_none() {
+        let Some(results) = Results::of(&self.run, &self.opened) else {
             return placeholder(ui, "Start a run to see its statistics.");
-        }
+        };
         // A run whose first step failed has no progress; the panel shows why.
-        let (Some(run), Some(progress), Some(info)) = (&self.run, self.progress, self.run_info)
-        else {
+        let (Some(progress), Some(info)) = (self.progress, self.run_info) else {
             return;
         };
         let error = &mut self.error;
-        egui::ScrollArea::vertical().show(ui, |ui| stats::show(ui, run, progress, info, error));
+        egui::ScrollArea::vertical().show(ui, |ui| stats::show(ui, results, progress, info, error));
     }
 
     fn ui_inputs(
@@ -388,15 +442,7 @@ impl ManybodyTab {
                 ));
             }
             Phase::Idle => {
-                let text = match blocked {
-                    Some(why) => why.to_string(),
-                    None if self.stopped() => format!(
-                        "Stopped after {} sweeps; results stay for saving",
-                        sweeps(self.progress)
-                    ),
-                    None => format!("Ready: L = {:.0} Å", self.box_length(molarity)),
-                };
-                ui.weak(text);
+                ui.weak(self.idle_status(blocked, molarity));
             }
         }
         if let Some(note) = &self.gpu_note {
@@ -407,6 +453,18 @@ impl ManybodyTab {
             .on_hover_text(format!(
                 "Bead sums run on the CPU, slowing the page: {note}"
             ));
+        }
+    }
+
+    fn idle_status(&self, blocked: Option<&str>, molarity: f64) -> String {
+        let sweeps = self.progress.map_or(0, |p| p.sweep);
+        match blocked {
+            Some(why) => why.to_string(),
+            None if self.opened.is_some() => format!("Loaded from file · {sweeps} sweeps"),
+            None if self.stopped() => {
+                format!("Stopped after {sweeps} sweeps; results stay for saving")
+            }
+            None => format!("Ready: L = {:.0} Å", self.box_length(molarity)),
         }
     }
 
@@ -640,12 +698,14 @@ impl ManybodyTab {
 
     /// Detailed runs set up GPU bead sums first; `poll_start` launches them.
     fn start(&mut self, archive: &ScanArchive, molarity: f64) {
+        // Panes and Save would otherwise keep an opened run while the GPU sets up.
+        (self.opened, self.progress, self.run_info) = (None, None, None);
         let mut spec = self.spec(molarity);
         self.gpu_note = None;
         self.error = None;
         if !self.detailed {
             let run = NBodyRun::start(archive, spec, RESIDUE_FORM_FACTORS);
-            return self.launch(archive, run, molarity);
+            return self.launch(archive, run);
         }
         spec.device = Device::Gpu;
         let setup = NBodyRun::scattering(archive, &spec, RESIDUE_FORM_FACTORS);
@@ -676,7 +736,6 @@ impl ManybodyTab {
             reference,
             ..
         } = starting;
-        let molarity = spec.molarity;
         let Some(archive) = archive.filter(|a| a.bodies[0] == reference) else {
             self.error = Some("the scan changed during GPU setup; press Run again".into());
             return;
@@ -690,22 +749,16 @@ impl ManybodyTab {
                 run
             }
         };
-        self.launch(archive, run, molarity);
+        self.launch(archive, run);
     }
 
-    fn launch(&mut self, archive: &ScanArchive, run: anyhow::Result<NBodyRun>, molarity: f64) {
+    fn launch(&mut self, archive: &ScanArchive, run: anyhow::Result<NBodyRun>) {
         match run {
             Ok(run) => {
+                let ionic_strength = archive.settings.ionic_strength;
+                self.run_info = Some(RunInfo::new(run.spec(), ionic_strength));
                 self.run = Some(run);
-                self.run_info = Some(RunInfo {
-                    n_bodies: self.n_bodies,
-                    copies: self.copies,
-                    millimolar: molarity * 1e3,
-                    ionic_millimolar: archive.settings.ionic_strength * 1e3,
-                    detailed: self.detailed,
-                    tune_steps: self.tune_steps,
-                    record_trajectory: self.record_trajectory,
-                });
+                self.opened = None;
                 self.running = true;
                 self.unsettled = false;
                 self.run_id += 1;
@@ -855,6 +908,25 @@ fn overridable(
     ui.end_row();
 }
 
+/// `results` once they have production frames; until then a placeholder
+/// saying what `what` waits for. Free, so the caller keeps its fields.
+fn produced<'a>(
+    ui: &mut egui::Ui,
+    results: Option<Results<'a>>,
+    progress: Option<Progress>,
+    what: &str,
+) -> Option<Results<'a>> {
+    let Some(results) = results else {
+        placeholder(ui, &format!("Start a run to see {what}."));
+        return None;
+    };
+    if progress.is_none_or(|p| p.frames == 0) {
+        placeholder(ui, "No production frames yet.");
+        return None;
+    }
+    Some(results)
+}
+
 /// A Twobody-style heading: rule, bold title.
 fn section(ui: &mut egui::Ui, title: &str) {
     crate::widgets::section(ui);
@@ -916,5 +988,46 @@ mod tests {
             tab.restore(Some(&spec), None);
             assert_eq!(tab.spec(0.004), spec);
         }
+    }
+
+    /// A saved run opens as a finished result: idle, so Run starts afresh,
+    /// with the panes on the saved curves.
+    #[test]
+    fn an_opened_run_is_idle_and_shows_what_was_saved() {
+        let archive = crate::test_archive::archive();
+        let molarity = 0.01;
+        let mut live = ManybodyTab {
+            n_bodies: 8,
+            copies: 1,
+            ..Default::default()
+        };
+        live.start(&archive, molarity);
+        for _ in 0..20 {
+            live.tick(Some(&archive));
+        }
+        live.stop();
+        let sweeps = live.progress.unwrap().sweep;
+        let saved = live.results().unwrap().record().into_owned();
+        assert!(sweeps > 0 && saved.sweeps == sweeps);
+
+        // No scan: the record alone must describe its run.
+        let mut opened = ManybodyTab::default();
+        opened.show_opened(Some(Opened {
+            record: saved.clone(),
+            trajectory: None,
+        }));
+        assert!(opened.phase() == Phase::Idle);
+        let (shown, was) = (opened.results().unwrap(), live.results().unwrap());
+        assert_eq!(shown.curve(), was.curve());
+        assert_eq!(shown.energy(), was.energy());
+        assert_eq!(opened.run_info.unwrap().ionic_millimolar, 100.0);
+        let status = opened.idle_status(None, molarity);
+        assert_eq!(status, format!("Loaded from file · {sweeps} sweeps"));
+
+        opened.show_opened(None);
+        assert!(
+            opened.results().is_none(),
+            "a session without a run clears it"
+        );
     }
 }

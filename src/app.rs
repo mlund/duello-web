@@ -1,12 +1,14 @@
 use crate::conditions::SolutionConditions;
 use crate::forcefield::ForceField;
 use crate::manybody::ManybodyTab;
+use crate::manybody::Opened;
 use crate::onebody::OnebodyTab;
 use crate::session_file::SessionFile;
 use crate::structures::Structures;
 use crate::twobody::TwobodyTab;
 use duello::archive::Session;
 use duello::bundle::{Bundle, BundleRef, Extracts};
+use duello::nbody::RunRecord;
 
 pub struct DuelloApp {
     tab: Tab,
@@ -97,17 +99,31 @@ impl DuelloApp {
         }
     }
 
-    /// What Save session writes, given `session` from [`Self::session`].
-    fn bundle<'a>(&'a self, session: &'a Session) -> BundleRef<'a> {
+    /// What Save session writes, given `session` from [`Self::session`]
+    /// and `run` from Manybody's results.
+    fn bundle<'a>(
+        &'a self,
+        session: &'a Session,
+        run: Option<&'a RunRecord>,
+        trajectory: Option<&'a [u8]>,
+    ) -> BundleRef<'a> {
         BundleRef {
             session,
             scan: self.twobody.archive(),
-            run: None,
+            run,
+            trajectory,
         }
     }
 
     fn save_session(&mut self) {
-        let zip = || self.bundle(&self.session()).to_zip(&self.extracts());
+        let zip = || {
+            let results = self.manybody.results();
+            let run = results.map(|r| r.record());
+            let trajectory = results.and_then(|r| r.trajectory());
+            let session = self.session();
+            let bundle = self.bundle(&session, run.as_deref(), trajectory.as_deref());
+            bundle.to_zip(&self.extracts())
+        };
         if let Err(e) = SessionFile::save(zip) {
             self.notice = Some(format!("Save failed: {e:#}"));
         }
@@ -138,7 +154,12 @@ impl DuelloApp {
     /// Every tab as an opened session left it. A CLI scan has no inputs, so
     /// its settings stand in, and no structures, so Onebody's list stays.
     fn restore(&mut self, bundle: Bundle) {
-        let Bundle { session, scan, .. } = bundle;
+        let Bundle {
+            session,
+            scan,
+            run: record,
+            trajectory,
+        } = bundle;
         let Session {
             inputs,
             structures,
@@ -162,6 +183,8 @@ impl DuelloApp {
             }
         }
         self.manybody.restore(run.as_ref(), self.twobody.archive());
+        let opened = record.map(|record| Opened { record, trajectory });
+        self.manybody.show_opened(opened);
         if from_cli {
             return;
         }
@@ -189,7 +212,9 @@ impl DuelloApp {
             .add_enabled(!self.busy(), egui::Button::new("Open session…"))
             .on_hover_text(
                 "Load a .duello.zip and restore every tab: structures, force field, \
-                 conditions, scan inputs, Manybody inputs, and the scan if one was saved",
+                 conditions, scan inputs, Manybody inputs, and the scan and Manybody \
+                 run if saved, replacing what is shown now. An opened run shows as \
+                 finished; Run starts a new one",
             )
             .on_disabled_hover_text("Not while a scan or run is active")
             .clicked()
@@ -217,14 +242,17 @@ impl DuelloApp {
 
     /// What Save session writes now.
     fn save_tip(&self) -> String {
-        let scan = if self.twobody.archive().is_some() {
-            "the shown scan (table, CG bodies, PMF, poses)"
-        } else {
-            "no scan yet"
+        let scan = match self.twobody.archive() {
+            Some(_) => "the shown scan (table, CG bodies, PMF, poses)",
+            None => "no scan yet",
         };
+        let run = self
+            .manybody
+            .saved_results()
+            .unwrap_or("no Manybody run yet");
         format!(
             "Every tab's inputs (structures, force field, conditions, scan and Manybody \
-             inputs), the analysed molecule's beads and titration, and {scan}, as \
+             inputs), the analysed molecule's beads and titration, {scan}, and {run}, as \
              .duello.zip. Keep it zipped: Safari's \"Open safe files after downloading\" \
              unzips downloads."
         )
@@ -338,7 +366,7 @@ mod tests {
             model: Model::KimHummer,
             cg: CgPolicy::Single,
         };
-        let bytes = (saved.bundle(&saved.session()))
+        let bytes = (saved.bundle(&saved.session(), None, None))
             .to_zip(&saved.extracts())
             .unwrap();
 

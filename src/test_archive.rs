@@ -61,7 +61,15 @@ fn table(s: &ScanSettings) -> duello::Table6DAdaptive<f32> {
         }
         builder.finish_r_slice(ri);
     }
-    builder.build()
+    let mut table = builder.build();
+    // Many-body runs read the scan temperature from here.
+    let metadata = table.metadata.get_or_insert_with(Default::default);
+    metadata.temperature = Some(s.temperature);
+    metadata.point_group = match s.homo_dimer {
+        true => duello::PointGroup::Exchange,
+        false => duello::PointGroup::Asymmetric,
+    };
+    table
 }
 
 /// Mass centre at the origin, one bead of each sign.
