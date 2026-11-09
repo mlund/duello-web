@@ -16,7 +16,7 @@ use duello::archive::{ScanArchive, StructureFile};
 use duello::web_api::{ScanProgress, ScanSettings};
 use duello::Subdivision;
 use pane::Pane;
-use poses::{poses_shown, PosesView};
+use poses::PosesView;
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -184,11 +184,8 @@ impl TwobodyTab {
                 Some(result) => thermo::thermodynamics(ui, result),
                 None => placeholder(ui, "Available once the scan finishes"),
             },
-            Pane::Poses => {
-                let result = self.result.as_ref();
-                let shown = poses_shown(&self.status, result);
-                self.poses.ui(ui, result.filter(|_| shown));
-            }
+            // A scan clears the result when it starts, so poses show only once it ends.
+            Pane::Poses => self.poses.ui(ui, self.result.as_ref()),
         }
     }
 
@@ -530,12 +527,12 @@ impl TwobodyTab {
              the e^(−w/kT) at σ row checks the choice after the scan.",
             duello::steric::CORE_RADIUS_SCALE
         );
-        let inputs = &mut self.inputs;
-        // install_result writes the scanned value back while Auto is on.
-        let note = match self.result.is_some() {
-            true => format!("at scan start (last scan: {:.1} \u{00C5})", inputs.rmin),
-            false => "at scan start".into(),
+        // From the result: inputs.rmin may have been edited since, with Auto off.
+        let note = match &self.result {
+            Some(r) => format!("at scan start (last scan: {:.1} \u{00C5})", r.settings.rmin),
+            None => "at scan start".into(),
         };
+        let inputs = &mut self.inputs;
         row(ui, "R_min", &tip, |ui| {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut inputs.rmin_auto, "Auto");

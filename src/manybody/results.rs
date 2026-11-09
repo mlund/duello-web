@@ -57,6 +57,8 @@ impl<'a> Results<'a> {
     /// borrowed from the engine, as it can reach hundreds of MB.
     pub fn trajectory(self) -> Option<Cow<'a, [u8]>> {
         match self {
+            // Checked first: the error would be built every frame otherwise.
+            Self::Live(run) if !run.spec().record_trajectory => None,
             Self::Live(run) => run.trajectory_bytes().ok(),
             Self::Opened(o) => o.trajectory.as_deref().map(Cow::Borrowed),
         }

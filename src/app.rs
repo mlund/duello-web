@@ -148,7 +148,7 @@ impl DuelloApp {
 
     /// A scan or run in progress, which an opened session would mix with.
     fn busy(&self) -> bool {
-        !self.twobody.idle() || self.manybody.is_busy()
+        !self.twobody.idle() || self.manybody.is_active()
     }
 
     /// Every tab as an opened session left it. A CLI scan has no inputs, so

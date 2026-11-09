@@ -162,6 +162,12 @@ impl ManybodyTab {
         self.running || self.starting.is_some() || self.unsettled
     }
 
+    /// True while a run is live or starting, even paused: replacing the
+    /// tab's state then would discard it.
+    pub fn is_active(&self) -> bool {
+        self.phase() != Phase::Idle || self.unsettled
+    }
+
     /// Advances a running simulation by one frame's budget; called every
     /// frame whichever tab is shown, so switching tabs doesn't pause it.
     /// `archive` completes a GPU setup that finished meanwhile.
@@ -698,8 +704,8 @@ impl ManybodyTab {
 
     /// Detailed runs set up GPU bead sums first; `poll_start` launches them.
     fn start(&mut self, archive: &ScanArchive, molarity: f64) {
-        // Panes and Save would otherwise keep an opened run while the GPU sets up.
-        (self.opened, self.progress, self.run_info) = (None, None, None);
+        // The last results stay shown and saved until `launch` replaces them,
+        // so a failed start keeps them.
         let mut spec = self.spec(molarity);
         self.gpu_note = None;
         self.error = None;
@@ -946,7 +952,6 @@ fn copy_picker(ui: &mut egui::Ui, copy: &mut usize, copies: usize) {
         .on_hover_text("Which independent copy of the system to show");
 }
 
-/// What a pane shows until it has data.
 /// Runs `future` without blocking the browser's event loop, which GPU
 /// readbacks need; natively it simply completes here.
 fn spawn<T: 'static>(future: impl Future<Output = T> + 'static) -> mpsc::Receiver<T> {

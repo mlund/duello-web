@@ -1,6 +1,5 @@
 //! The Poses window: the scan's lowest-energy states, drawn as beads.
 
-use crate::compute::ComputeStatus;
 use crate::viewer::{charge_color, Rgba, Scene, Sphere, Viewer};
 use crate::widgets::placeholder;
 use duello::archive::{CgBody, ScanArchive};
@@ -129,11 +128,6 @@ fn bounds(spheres: &[Sphere]) -> crate::viewer::Bounds {
     (centre, spheres.iter().map(reach).fold(1.0, f32::max))
 }
 
-/// Only a finished or imported scan has the whole table to rank.
-pub fn poses_shown(status: &ComputeStatus, result: Option<&ScanArchive>) -> bool {
-    matches!(status, ComputeStatus::Idle) && result.is_some()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,18 +141,5 @@ mod tests {
             assert_eq!(tinted_charge_color(z, a), charge_color(z));
             assert_eq!(tinted_charge_color(z, b), charge_color(z));
         }
-    }
-
-    #[test]
-    fn poses_show_only_for_a_finished_scan() {
-        let archive = crate::test_archive::archive();
-        let running = ComputeStatus::Running {
-            current_r: 1,
-            total_r: 3,
-        };
-        assert!(!poses_shown(&running, None));
-        assert!(!poses_shown(&running, Some(&archive)));
-        assert!(!poses_shown(&ComputeStatus::Idle, None));
-        assert!(poses_shown(&ComputeStatus::Idle, Some(&archive)));
     }
 }
