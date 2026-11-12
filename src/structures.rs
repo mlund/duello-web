@@ -92,6 +92,15 @@ impl Structures {
         self.entries.iter_mut().find(|e| e.id == id)
     }
 
+    /// Name plus kept chains, if not all: copies of one file differ only there.
+    pub fn label(&self, id: StructureId) -> Option<String> {
+        let file = self.get(id)?;
+        Some(match file.chains.as_slice() {
+            [] => file.name.clone(),
+            chains => format!("{} ({})", file.name, chains.join(", ")),
+        })
+    }
+
     /// Ids and names in load order.
     pub fn list(&self) -> impl Iterator<Item = (StructureId, &str)> {
         self.entries.iter().map(|e| (e.id, e.file.name.as_str()))
@@ -474,6 +483,15 @@ mod tests {
         let mut structures = Structures::default();
         let ids = structures.replace(names.iter().map(|n| file(n, n.as_bytes())).collect());
         (structures, ids)
+    }
+
+    /// Two copies of one file differ only by their chains, so pickers show them.
+    #[test]
+    fn labels_name_the_kept_chains_unless_all_are_kept() {
+        let (mut structures, ids) = loaded(&["1BRS.pdb"]);
+        assert_eq!(structures.label(ids[0]).as_deref(), Some("1BRS.pdb"));
+        structures.entry_mut(ids[0]).unwrap().file.chains = vec!["A".into(), "D".into()];
+        assert_eq!(structures.label(ids[0]).as_deref(), Some("1BRS.pdb (A, D)"));
     }
 
     /// A saved session carries the custom name; clearing it brings the file name back.

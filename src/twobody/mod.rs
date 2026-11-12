@@ -673,12 +673,13 @@ fn molecule_picker(
     slot: &mut Option<StructureId>,
     structures: &Structures,
 ) {
-    let name = |id| structures.get(id).map(|f| f.name.as_str());
+    let selected = slot.and_then(|id| structures.label(id));
     egui::ComboBox::from_id_salt(label)
-        .selected_text(slot.and_then(name).unwrap_or("—"))
+        .selected_text(selected.unwrap_or_else(|| "—".into()))
         .show_ui(ui, |ui| {
-            for (id, name) in structures.list() {
-                ui.selectable_value(slot, Some(id), name);
+            for (id, _) in structures.list() {
+                let text = structures.label(id).unwrap_or_default();
+                ui.selectable_value(slot, Some(id), text);
             }
         })
         .response
