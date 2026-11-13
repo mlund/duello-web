@@ -1,908 +1,400 @@
-use crate::compute::{ComputeResult, ComputeStatus};
-use duello::web_api::{PmfPoint, ScanProgress};
-use egui_plot::{Line, MarkerShape, Plot, PlotPoint, Points};
-use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::Arc;
-
-/// Force field model choices.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Model {
-    Calvados3,
-    KimHummer,
-    Pasquier,
-}
-
-impl Model {
-    pub fn name(&self) -> &str {
-        match self {
-            Model::Calvados3 => "calvados3",
-            Model::KimHummer => "kimhummer",
-            Model::Pasquier => "pasquier",
-        }
-    }
-
-    fn label(&self) -> &str {
-        match self {
-            Model::Calvados3 => "CALVADOS 3",
-            Model::KimHummer => "Kim-Hummer",
-            Model::Pasquier => "Pasquier",
-        }
-    }
-}
-
-/// Coarse-graining policy.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum CgPolicy {
-    Single,
-    Multi,
-}
-
-/// Scan parameters editable in the UI.
-#[derive(Clone)]
-pub struct ScanInputs {
-    pub rmin: f64,
-    pub rmax: f64,
-    pub dr: f64,
-    pub molarity: f64,
-    pub temperature: f64,
-    pub max_ndiv: usize,
-    pub gradient_threshold: f64,
-    pub cutoff: f64,
-    pub grid_size: usize,
-    pub ph: f64,
-    pub model: Model,
-    pub cg: CgPolicy,
-    pub homo_dimer: bool,
-}
-
-impl Default for ScanInputs {
-    fn default() -> Self {
-        Self {
-            rmin: 26.0,
-            rmax: 60.0,
-            dr: 1.0,
-            molarity: 0.1,
-            temperature: 298.15,
-            max_ndiv: 2,
-            gradient_threshold: 0.5,
-            cutoff: 20.0,
-            grid_size: 200,
-            ph: 7.0,
-            model: Model::Calvados3,
-            cg: CgPolicy::Single,
-            homo_dimer: false,
-        }
-    }
-}
-
-/// Action requested by mol_input_ui.
-enum MolAction {
-    None,
-    PickFile,
-    FetchPdb,
-}
-
-/// Plot data in egui_plot's own type, so frames borrow it instead of converting.
-/// Filled point by point while a scan runs, then replaced by the final result.
-#[derive(Default)]
-struct PlotCache {
-    pmf: Vec<PlotPoint>,
-    mean_energy: Vec<PlotPoint>,
-    /// -TS = F - U, the entropic part of the free energy.
-    entropy: Vec<PlotPoint>,
-}
-
-impl PlotCache {
-    fn from_result(result: &ComputeResult) -> Self {
-        let mut cache = Self::default();
-        result.points.iter().for_each(|&p| cache.push(p));
-        cache
-    }
-
-    fn push(&mut self, p: PmfPoint) {
-        let r = p.r as f64;
-        let (f, u) = (p.free_energy as f64, p.mean_energy as f64);
-        self.pmf.push(PlotPoint::new(r, f));
-        self.mean_energy.push(PlotPoint::new(r, u));
-        self.entropy.push(PlotPoint::new(r, f - u));
-    }
-}
-
-/// Per-molecule upload state.
-struct MolUpload {
-    name: String,
-    data: Vec<u8>,
-}
+use crate::conditions::SolutionConditions;
+use crate::forcefield::ForceField;
+use crate::manybody::ManybodyTab;
+use crate::manybody::Opened;
+use crate::onebody::OnebodyTab;
+use crate::session_file::SessionFile;
+use crate::structures::Structures;
+use crate::twobody::TwobodyTab;
+use duello::archive::Session;
+use duello::bundle::{Bundle, BundleRef, Extracts};
+use duello::nbody::RunRecord;
 
 pub struct DuelloApp {
-    inputs: ScanInputs,
-    mol1: Option<MolUpload>,
-    mol2: Option<MolUpload>,
-    /// PDB ID text fields for fetching from RCSB
-    pdb_id1: String,
-    pdb_id2: String,
-    status: ComputeStatus,
-    result: Option<ComputeResult>,
-    /// Cached plot data (computed once from result, reused each frame).
-    plot_cache: Option<PlotCache>,
-    /// Set to true when new results arrive, consumed on next plot render.
-    plot_needs_reset: bool,
-    error: Option<String>,
-    gpu_available: bool,
-    /// Channel for receiving results from background scan thread.
-    result_rx: Option<mpsc::Receiver<anyhow::Result<ComputeResult>>>,
-    /// Progress and PMF points, one message per finished R-bin.
-    progress_rx: Option<mpsc::Receiver<ScanProgress>>,
-    /// Flag to signal cancellation to the running scan.
-    cancel_flag: Arc<AtomicBool>,
-    /// Channel for receiving file uploads (mol_num, name, data).
-    file_rx: Option<mpsc::Receiver<(u8, String, Vec<u8>)>>,
+    tab: Tab,
+    /// Inputs shared by the tabs; Onebody edits them.
+    structures: Structures,
+    conditions: SolutionConditions,
+    forcefield: ForceField,
+    onebody: OnebodyTab,
+    twobody: TwobodyTab,
+    manybody: ManybodyTab,
+    /// Not yet validated: greyed out unless unlocked (see `experimental`).
+    manybody_unlocked: bool,
+    file: SessionFile,
+    /// Why the last open or save failed, until dismissed.
+    notice: Option<String>,
+}
+
+/// Single-protein analysis, two-body scan, or many-body MC built on the scan.
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Onebody,
+    Twobody,
+    Manybody,
+}
+
+/// egui's bundled fonts lack math glyphs such as ⟨⟩ and ⁻¹, which then show
+/// as boxes. A DejaVu Sans subset (Latin, Greek, scripts, arrows, math;
+/// license in assets/) fills the gaps without changing the default look.
+fn install_fallback_font(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "dejavu".into(),
+        egui::FontData::from_static(include_bytes!("../assets/DejaVuSans-subset.ttf")).into(),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("dejavu".into());
+    }
+    ctx.set_fonts(fonts);
 }
 
 impl DuelloApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        // On WASM, we can't synchronously check GPU availability (pollster::block_on panics).
-        // Assume available; errors will surface when the scan actually starts.
-        #[cfg(target_arch = "wasm32")]
-        let gpu_available = true;
-        #[cfg(not(target_arch = "wasm32"))]
-        let gpu_available = duello::backend::GpuBackend::is_available();
-        if !gpu_available {
-            log::warn!("No GPU adapter found. Scan requires WebGPU support.");
-        }
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        install_fallback_font(&cc.egui_ctx);
+        crate::viewer::register(cc);
         Self {
-            inputs: ScanInputs::default(),
-            mol1: None,
-            mol2: None,
-            pdb_id1: "2CDS".to_string(),
-            pdb_id2: "2CDS".to_string(),
-            status: ComputeStatus::Idle,
-            result: None,
-            plot_cache: None,
-            plot_needs_reset: false,
-            error: if gpu_available {
+            manybody_unlocked: crate::experimental::manybody_unlocked(),
+            ..Self::blank()
+        }
+    }
+
+    /// No structures, default inputs, no scan or run.
+    fn blank() -> Self {
+        Self {
+            tab: Tab::Onebody,
+            structures: Structures::default(),
+            conditions: SolutionConditions::default(),
+            forcefield: ForceField::default(),
+            onebody: OnebodyTab::default(),
+            twobody: TwobodyTab::new(),
+            manybody: Default::default(),
+            manybody_unlocked: false,
+            file: SessionFile::default(),
+            notice: None,
+        }
+    }
+
+    /// Every tab's inputs; the inverse of `restore`. Structures removed, or
+    /// with other chains, since the scan leave its pair unknown.
+    fn session(&self) -> Session {
+        let structures = &self.structures;
+        let scanned = (self.twobody.scanned(structures))
+            .and_then(|[a, b]| Some([structures.index_of(a)?, structures.index_of(b)?]));
+        let inputs = (self.twobody.inputs()).settings(&self.conditions, &self.forcefield);
+        Session {
+            inputs: Some(inputs),
+            structures: structures.files(),
+            scanned,
+            estimate: self.conditions.estimate,
+            run: Some(self.manybody.spec(self.conditions.protein_molarity())),
+        }
+    }
+
+    /// Onebody's analysed molecule, which only the saved file shows.
+    fn extracts(&self) -> Extracts<'_> {
+        let selected = self.structures.selected();
+        let file = selected.and_then(|id| Some((id, self.structures.get(id)?)));
+        let molecule = file.and_then(|(id, file)| self.onebody.extract(id, file));
+        Extracts {
+            molecules: molecule.into_iter().collect(),
+        }
+    }
+
+    /// What Save session writes, given `session` from [`Self::session`]
+    /// and `run` from Manybody's results.
+    fn bundle<'a>(
+        &'a self,
+        session: &'a Session,
+        run: Option<&'a RunRecord>,
+        trajectory: Option<&'a [u8]>,
+    ) -> BundleRef<'a> {
+        BundleRef {
+            session,
+            scan: self.twobody.archive(),
+            run,
+            trajectory,
+        }
+    }
+
+    fn save_session(&mut self) {
+        let zip = || {
+            let results = self.manybody.results();
+            let run = results.map(|r| r.record());
+            let trajectory = results.and_then(|r| r.trajectory());
+            let session = self.session();
+            let bundle = self.bundle(&session, run.as_deref(), trajectory.as_deref());
+            bundle.to_zip(&self.extracts())
+        };
+        if let Err(e) = SessionFile::save(zip) {
+            self.notice = Some(format!("Save failed: {e:#}"));
+        }
+    }
+
+    /// Takes a picked session once it is read; true if one was. A scan or
+    /// run started while the browser read the file would mix with it.
+    fn poll_open(&mut self) -> bool {
+        let Some(opened) = self.file.take_opened() else {
+            return false;
+        };
+        self.notice = match opened {
+            Ok(_) if self.busy() => Some("Open ignored: a scan or run is active".into()),
+            Ok(bundle) => {
+                self.restore(bundle);
                 None
-            } else {
-                Some("No GPU/WebGPU adapter found. A WebGPU-capable browser is required (Chrome 113+, Edge 113+).".to_string())
-            },
-            gpu_available,
-            result_rx: None,
-            progress_rx: None,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
-            file_rx: None,
+            }
+            Err(e) => Some(format!("Open failed: {e:#}")),
+        };
+        true
+    }
+
+    /// A scan or run in progress, which an opened session would mix with.
+    fn busy(&self) -> bool {
+        !self.twobody.idle() || self.manybody.is_active()
+    }
+
+    /// Every tab as an opened session left it. A CLI scan has no inputs, so
+    /// its settings stand in, and no structures, so Onebody's list stays.
+    fn restore(&mut self, bundle: Bundle) {
+        let Bundle {
+            session,
+            scan,
+            run: record,
+            trajectory,
+        } = bundle;
+        let Session {
+            inputs,
+            structures,
+            scanned,
+            estimate,
+            run,
+        } = session;
+        let from_cli = inputs.is_none();
+        self.tab = if scan.is_some() {
+            Tab::Twobody
+        } else {
+            Tab::Onebody
+        };
+        let inputs = inputs.or_else(|| scan.as_ref().map(|s| s.settings.clone()));
+        self.twobody.show_opened(scan, inputs.as_ref());
+        if let Some(inputs) = &inputs {
+            let molarity = run.as_ref().map(|r| r.molarity);
+            self.conditions.restore(inputs, estimate, molarity);
+            if let Some(warning) = self.forcefield.adopt(inputs) {
+                self.twobody.warn(warning);
+            }
+        }
+        self.manybody.restore(run.as_ref(), self.twobody.archive());
+        let opened = record.map(|record| Opened { record, trajectory });
+        self.manybody.show_opened(opened);
+        if from_cli {
+            return;
+        }
+        let ids = self.structures.replace(structures);
+        // Indices were checked against the structures on load.
+        if let Some([a, b]) = scanned {
+            self.twobody
+                .select_scanned([ids[a], ids[b]], &self.structures);
         }
     }
 
-    fn ui_left_panel(&mut self, ui: &mut egui::Ui) {
-        // The browser shows this in the HTML header instead.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            crate::version::ui(ui);
-            ui.add_space(4.0);
+    /// File menu, tabs, and on the right what is running.
+    fn ui_top_bar(&mut self, ui: &mut egui::Ui) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| self.ui_file_menu(ui));
             ui.separator();
-            ui.add_space(2.0);
-        }
-
-        // --- Molecules ---
-        ui.strong("Molecules");
-        ui.add_space(2.0);
-
-        ui.label("Molecule 1:");
-        match Self::mol_input_ui(ui, &self.mol1, &mut self.pdb_id1) {
-            MolAction::PickFile => self.pick_file(1),
-            MolAction::FetchPdb => self.fetch_pdb(1),
-            MolAction::None => {}
-        }
-
-        ui.add_space(2.0);
-        ui.label("Molecule 2:");
-        match Self::mol_input_ui(ui, &self.mol2, &mut self.pdb_id2) {
-            MolAction::PickFile => self.pick_file(2),
-            MolAction::FetchPdb => self.fetch_pdb(2),
-            MolAction::None => {}
-        }
-
-        ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(2.0);
-
-        // --- Force field ---
-        ui.strong("Force field");
-        ui.add_space(2.0);
-
-        egui::Grid::new("ff_grid")
-            .num_columns(2)
-            .spacing([8.0, 4.0])
-            .show(ui, |ui| {
-                ui.label("Model");
-                egui::ComboBox::from_id_salt("model_combo")
-                    .selected_text(self.inputs.model.label())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.inputs.model, Model::Calvados3, "CALVADOS 3");
-                        ui.selectable_value(&mut self.inputs.model, Model::KimHummer, "Kim-Hummer");
-                        ui.selectable_value(&mut self.inputs.model, Model::Pasquier, "Pasquier");
-                    });
-                ui.end_row();
-
-                ui.label("CG policy");
-                egui::ComboBox::from_id_salt("cg_combo")
-                    .selected_text(match self.inputs.cg {
-                        CgPolicy::Single => "Single bead",
-                        CgPolicy::Multi => "Multi bead",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.inputs.cg, CgPolicy::Single, "Single bead");
-                        ui.selectable_value(&mut self.inputs.cg, CgPolicy::Multi, "Multi bead");
-                    });
-                ui.end_row();
+            self.ui_tab_strip(ui);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.ui_status(ui)
             });
+        });
+    }
 
-        ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(2.0);
-
-        // --- Solution ---
-        ui.strong("Solution");
-        ui.add_space(2.0);
-
-        egui::Grid::new("solution_grid")
-            .num_columns(2)
-            .spacing([8.0, 4.0])
-            .show(ui, |ui| {
-                ui.label("pH");
-                ui.add(
-                    egui::DragValue::new(&mut self.inputs.ph)
-                        .speed(0.1)
-                        .range(0.0..=14.0),
-                )
-                .on_hover_text(
-                    "Determines the average ionization state of titratable groups \
-                    and N/C terminal ends using Metropolis GCMC swap moves.",
-                );
-                ui.end_row();
-
-                ui.label("Ionic strength");
-                ui.add(
-                    egui::DragValue::new(&mut self.inputs.molarity)
-                        .speed(0.01)
-                        .suffix(" M")
-                        .range(0.0..=10.0),
-                )
-                .on_hover_text(
-                    "Sets the Debye screening length used in both the Monte Carlo \
-                    titration of ionizable groups and in the intermolecular \
-                    protein-protein interaction energy via the Yukawa potential.",
-                );
-                ui.end_row();
-
-                ui.label("Temperature");
-                ui.add(
-                    egui::DragValue::new(&mut self.inputs.temperature)
-                        .speed(1.0)
-                        .suffix(" K")
-                        .range(1.0..=1000.0),
-                )
-                .on_hover_text(
-                    "Affects the thermal energy used in Boltzmann averaging \
-                    and the dielectric constant of water.",
-                );
-                ui.end_row();
-            });
-
-        ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(2.0);
-
-        // --- Scan range ---
-        ui.strong("Scan range");
-        ui.add_space(2.0);
-
-        egui::Grid::new("scan_grid")
-            .num_columns(2)
-            .spacing([8.0, 4.0])
-            .show(ui, |ui| {
-                ui.label("R min");
-                ui.add(
-                    egui::DragValue::new(&mut self.inputs.rmin)
-                        .speed(0.5)
-                        .suffix(" \u{00C5}"),
-                )
-                .on_hover_text(
-                    "Minimum sampled center of mass separation between the proteins. \
-                    Below this value we assume infinite repulsion in the osmotic second \
-                    virial coefficient, B\u{2082}. Directly affects the reduced virial \
-                    coefficient so pay attention when comparing with experiment or other models.",
-                );
-                ui.end_row();
-
-                ui.label("R max");
-                ui.add(
-                    egui::DragValue::new(&mut self.inputs.rmax)
-                        .speed(0.5)
-                        .suffix(" \u{00C5}"),
-                );
-                ui.end_row();
-
-                ui.label("\u{0394}R");
-                ui.add(
-                    egui::DragValue::new(&mut self.inputs.dr)
-                        .speed(0.1)
-                        .suffix(" \u{00C5}")
-                        .range(0.1..=10.0),
-                );
-                ui.end_row();
-            });
-
-        ui.add_space(4.0);
-
-        // --- Resolution ---
-        ui.label("Angular resolution");
-        ui.add(egui::Slider::new(&mut self.inputs.max_ndiv, 0..=4))
+    fn ui_file_menu(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .add_enabled(!self.busy(), egui::Button::new("Open session…"))
             .on_hover_text(
-                "Number of icosphere subdivisions controlling the angular resolution. \
-                Zero means 12 vertices on the regular icosahedron; each subdivision \
-                increases the number of angular samples.",
-            );
-
-        ui.add_space(6.0);
-
-        // --- Advanced (collapsed) ---
-        egui::CollapsingHeader::new("Advanced")
-            .default_open(false)
-            .show(ui, |ui| {
-                egui::Grid::new("advanced_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Cutoff");
-                        ui.add(
-                            egui::DragValue::new(&mut self.inputs.cutoff)
-                                .speed(1.0)
-                                .suffix(" \u{00C5}")
-                                .range(1.0..=500.0),
-                        );
-                        ui.end_row();
-
-                        ui.label("Gradient threshold");
-                        ui.add(
-                            egui::DragValue::new(&mut self.inputs.gradient_threshold)
-                                .speed(0.1)
-                                .range(0.0..=10.0),
-                        );
-                        ui.end_row();
-
-                        ui.label("Spline grid size");
-                        ui.add(
-                            egui::DragValue::new(&mut self.inputs.grid_size)
-                                .speed(10)
-                                .range(50..=1000),
-                        );
-                        ui.end_row();
-                    });
-            });
-
-        ui.add_space(8.0);
+                "Load a .duello.zip and restore every tab: structures, force field, \
+                 conditions, scan inputs, Manybody inputs, and the scan and Manybody \
+                 run if saved, replacing what is shown now. An opened run shows as \
+                 finished; Run starts a new one",
+            )
+            .on_disabled_hover_text("Not while a scan or run is active")
+            .clicked()
+        {
+            self.file.open();
+        }
+        if ui
+            .button("Save session…")
+            .on_hover_ui(|ui| {
+                ui.label(self.save_tip());
+            })
+            .clicked()
+        {
+            self.save_session();
+        }
         ui.separator();
-        ui.add_space(4.0);
-
-        // --- Validation & Run ---
-        let mut validation_errors = Vec::new();
-        if self.inputs.rmin >= self.inputs.rmax {
-            validation_errors.push("R min must be less than R max");
-        }
-        if self.inputs.dr <= 0.0 {
-            validation_errors.push("\u{0394}R must be positive");
-        }
-
-        for err in &validation_errors {
-            ui.colored_label(egui::Color32::LIGHT_RED, *err);
-        }
-
-        let can_run = self.mol1.is_some()
-            && (self.inputs.homo_dimer || self.mol2.is_some())
-            && matches!(self.status, ComputeStatus::Idle)
-            && validation_errors.is_empty()
-            && self.gpu_available;
-
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(can_run, egui::Button::new("Run scan"))
-                .clicked()
-            {
-                self.start_scan();
-            }
-            if matches!(self.status, ComputeStatus::Running { .. }) && ui.button("Cancel").clicked()
-            {
-                self.cancel_flag.store(true, Ordering::Relaxed);
-                self.abandon_scan();
-            }
+        let has_scan = self.twobody.archive().is_some();
+        ui.add_enabled_ui(has_scan, |ui| {
+            ui.menu_button("Export", |ui| self.twobody.export_menu(ui))
+                .response
+                .on_hover_text("The shown scan's results as plain files")
+                .on_disabled_hover_text("Run or open a scan first");
         });
     }
 
-    fn ui_center_panel(&mut self, ui: &mut egui::Ui, is_dark: bool) {
-        let Some(cache) = &self.plot_cache else {
-            ui.centered_and_justified(|ui| {
-                ui.label("Upload PDB files and run a scan to see the PMF plot.");
-            });
-            return;
+    /// What Save session writes now.
+    fn save_tip(&self) -> String {
+        let scan = match self.twobody.archive() {
+            Some(_) => "the shown scan (table, CG bodies, PMF, poses)",
+            None => "no scan yet",
         };
-        let rgb = |dark: (u8, u8, u8), light: (u8, u8, u8)| {
-            let (r, g, b) = if is_dark { dark } else { light };
-            egui::Color32::from_rgb(r, g, b)
-        };
-        let series = [
-            (
-                "Free energy",
-                &cache.pmf,
-                rgb((100, 150, 255), (30, 60, 180)),
-                MarkerShape::Circle,
-            ),
-            (
-                "Average energy",
-                &cache.mean_energy,
-                rgb((255, 120, 100), (200, 40, 30)),
-                MarkerShape::Diamond,
-            ),
-            (
-                "Entropy (\u{2212}TS)",
-                &cache.entropy,
-                rgb((110, 200, 120), (30, 130, 50)),
-                MarkerShape::Square,
-            ),
-        ];
+        let run = self
+            .manybody
+            .saved_results()
+            .unwrap_or("no Manybody run yet");
+        format!(
+            "Every tab's inputs (structures, force field, conditions, scan and Manybody \
+             inputs), the analysed molecule's beads and titration, {scan}, and {run}, as \
+             .duello.zip. Keep it zipped: Safari's \"Open safe files after downloading\" \
+             unzips downloads."
+        )
+    }
 
-        let mut plot = Plot::new("pmf_plot")
-            .legend(egui_plot::Legend::default())
-            .auto_bounds(egui::Vec2b::TRUE)
-            .x_axis_label("Center of mass separation, R (\u{00C5})")
-            .y_axis_label("Energy (kT)");
-        // Reset only when a scan starts or ends; auto_bounds follows the growing curve
-        // in between, so the user can still zoom while it runs.
-        if self.plot_needs_reset {
-            plot = plot.reset();
-            self.plot_needs_reset = false;
-        }
-        plot.show(ui, |plot_ui| {
-            for (name, data, color, shape) in series {
-                let data = data.as_slice();
-                plot_ui.line(Line::new(name, data).color(color).width(3.0_f32));
-                // Unnamed, so the legend lists each series once.
-                plot_ui.points(
-                    Points::new("", data)
-                        .color(color)
-                        .shape(shape)
-                        .radius(4.0_f32),
-                );
-            }
+    fn ui_tab_strip(&mut self, ui: &mut egui::Ui) {
+        ui.selectable_value(&mut self.tab, Tab::Onebody, "Onebody")
+            .on_hover_text("Structures, force field and solution conditions shared by every tab");
+        ui.selectable_value(&mut self.tab, Tab::Twobody, "Twobody")
+            .on_hover_text("Orientation-averaged potential of mean force between two molecules");
+        ui.add_enabled_ui(self.manybody_unlocked, |ui| {
+            ui.selectable_value(&mut self.tab, Tab::Manybody, "Manybody")
+                .on_hover_text("Monte Carlo of many copies of the Twobody scan's molecule")
+                .on_disabled_hover_text("Experimental: not yet validated");
         });
     }
 
-    fn ui_bottom_panel(&mut self, ui: &mut egui::Ui) {
-        // Progress bar
-        match &self.status {
-            ComputeStatus::Running { current_r, total_r } => {
-                let progress = *current_r as f32 / *total_r as f32;
-                ui.add(
-                    egui::ProgressBar::new(progress)
-                        .text(format!("Step {}/{}", current_r, total_r)),
-                );
-            }
-            ComputeStatus::Idle => {}
-        }
-
-        // Error display
-        if let Some(err) = &self.error {
-            ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
-        }
-
-        // Results
-        if let Some(result) = &self.result {
-            ui.separator();
-            let (mw1, mw2) = result.molar_masses;
-            let (z1, z2) = result.net_charges;
-            ui.label(format!("Mw = {mw1:.1} / {mw2:.1} g/mol"));
-            ui.label(format!("Net charge = {z1:+.1} / {z2:+.1} e"));
-            ui.separator();
-            let b2 = result.virial.b2();
-            ui.label(format!("B\u{2082} = {b2:.2} \u{00C5}\u{00B3}"));
-            let (mw1, mw2) = result.molar_masses;
-            ui.label(format!(
-                "B\u{2082} = {:.2e} mol*ml/g\u{00B2}",
-                result.virial.mol_ml_per_gram2(mw1, mw2)
-            ));
-            ui.label(format!(
-                "B\u{2082}/B\u{2082}hs = {:.2}, \u{03C3} = {:.2} \u{00C5}",
-                result.virial.reduced(),
-                result.virial.sigma()
-            ));
-            if let Some(kd) = result.virial.dissociation_const() {
-                ui.label(format!(
-                    "K\u{1D451} = {kd:.2e} mol/l, \u{03C3} = {:.2} \u{00C5}",
-                    result.virial.sigma()
-                ));
-            }
-
-            // Download buttons
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("PMF (.csv)").clicked() {
-                    self.download_csv();
-                }
-                if ui.button("Mol 1 (.xyz)").clicked() {
-                    self.download_string(&result.cg_xyz.0, "mol1_cg.xyz");
-                }
-                if ui.button("Mol 2 (.xyz)").clicked() {
-                    self.download_string(&result.cg_xyz.1, "mol2_cg.xyz");
-                }
-                if ui.button("Topology (.yaml)").clicked() {
-                    self.download_string(&result.topology_yaml, "topology.yaml");
-                }
-            });
-        }
-    }
-
-    /// UI for a single molecule input: upload button + PDB ID text field.
-    /// Returns an action to perform after the UI is drawn (avoids borrow issues).
-    fn mol_input_ui(ui: &mut egui::Ui, mol: &Option<MolUpload>, pdb_id: &mut String) -> MolAction {
-        if let Some(m) = mol {
-            ui.label(format!("Loaded: {}", m.name));
-        }
-
-        let mut action = MolAction::None;
-        ui.horizontal(|ui| {
-            if ui.button("Upload file...").clicked() {
-                action = MolAction::PickFile;
-            }
-            ui.label("or");
-            ui.add(
-                egui::TextEdit::singleline(pdb_id)
-                    .hint_text("PDB ID")
-                    .desired_width(50.0),
-            );
-            let id_valid = pdb_id.len() == 4 && pdb_id.chars().all(|c| c.is_alphanumeric());
-            if ui
-                .add_enabled(id_valid, egui::Button::new("Fetch"))
-                .clicked()
-            {
-                action = MolAction::FetchPdb;
-            }
-        });
-        action
-    }
-
-    /// Fetch a PDB file from RCSB by ID.
-    fn fetch_pdb(&mut self, mol_num: u8) {
-        let pdb_id = if mol_num == 1 {
-            self.pdb_id1.trim().to_uppercase()
+    /// Right to left: theme, GPU, then (natively) the version, which the
+    /// browser shows in its HTML header instead.
+    fn ui_status(&mut self, ui: &mut egui::Ui) {
+        // Three small icons (System, Dark, Light), in reading order: the bar
+        // lays out right to left.
+        let size = egui::vec2(72.0, ui.available_height());
+        let layout = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(size, layout, egui::widgets::global_theme_preference_buttons);
+        if self.twobody.gpu_available() {
+            ui.weak("GPU ✓")
+                .on_hover_text("A GPU/WebGPU adapter is available for scans");
         } else {
-            self.pdb_id2.trim().to_uppercase()
-        };
-        if pdb_id.len() != 4 {
-            return;
+            ui.colored_label(egui::Color32::LIGHT_RED, "No GPU")
+                .on_hover_text("Scans need WebGPU (Chrome 113+, Edge 113+)");
         }
-        let (tx, rx) = mpsc::channel();
-        self.file_rx = Some(rx);
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            wasm_bindgen_futures::spawn_local(async move {
-                let url = format!("https://files.rcsb.org/download/{pdb_id}.pdb");
-                match fetch_url(&url).await {
-                    Ok(data) => {
-                        let _ = tx.send((mol_num, format!("{pdb_id}.pdb"), data));
-                    }
-                    Err(e) => {
-                        log::error!("Failed to fetch PDB {pdb_id}: {e}");
-                    }
-                }
-            });
-        }
-
         #[cfg(not(target_arch = "wasm32"))]
+        crate::version::ui(ui);
+        self.ui_notice(ui);
+    }
+
+    /// Leftmost on the right: the reason the last open or save failed.
+    fn ui_notice(&mut self, ui: &mut egui::Ui) {
+        let Some(notice) = &self.notice else { return };
+        let label = egui::Label::new(egui::RichText::new(notice).color(egui::Color32::LIGHT_RED))
+            .truncate()
+            .sense(egui::Sense::click());
+        if ui
+            .add(label)
+            .on_hover_text(format!("{notice}\n\nClick to dismiss"))
+            .clicked()
         {
-            std::thread::spawn(move || {
-                let url = format!("https://files.rcsb.org/download/{pdb_id}.pdb");
-                match ureq::get(&url).call() {
-                    Ok(response) => {
-                        let mut data = Vec::new();
-                        if std::io::Read::read_to_end(
-                            &mut response.into_body().as_reader(),
-                            &mut data,
-                        )
-                        .is_ok()
-                        {
-                            let _ = tx.send((mol_num, format!("{pdb_id}.pdb"), data));
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Failed to fetch PDB {pdb_id}: {e}");
-                    }
-                }
-            });
+            self.notice = None;
         }
     }
-
-    fn pick_file(&mut self, mol_num: u8) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("PDB files", &["pdb"])
-                .pick_file()
-            {
-                if let Ok(data) = std::fs::read(&path) {
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let upload = MolUpload { name, data };
-                    if mol_num == 1 {
-                        self.mol1 = Some(upload);
-                    } else {
-                        self.mol2 = Some(upload);
-                    }
-                }
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let (tx, rx) = mpsc::channel();
-            self.file_rx = Some(rx);
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Some(file) = rfd::AsyncFileDialog::new()
-                    .add_filter("PDB files", &["pdb"])
-                    .pick_file()
-                    .await
-                {
-                    let name = file.file_name();
-                    let data = file.read().await;
-                    let _ = tx.send((mol_num, name, data));
-                }
-            });
-        }
-    }
-
-    fn start_scan(&mut self) {
-        let mol1_data = match &self.mol1 {
-            Some(m) => m.data.clone(),
-            None => return,
-        };
-        let mol2_data = if self.inputs.homo_dimer {
-            mol1_data.clone()
-        } else {
-            match &self.mol2 {
-                Some(m) => m.data.clone(),
-                None => return,
-            }
-        };
-
-        self.error = None;
-        self.result = None;
-        self.cancel_flag.store(false, Ordering::Relaxed);
-        self.status = ComputeStatus::Running {
-            current_r: 0,
-            total_r: 1,
-        };
-
-        // Empty until the first R-bin arrives; the plot then grows with the scan.
-        self.plot_cache = Some(PlotCache::default());
-        self.plot_needs_reset = true;
-
-        let (tx, rx) = mpsc::channel();
-        self.result_rx = Some(rx);
-        let (prog_tx, prog_rx) = mpsc::channel();
-        self.progress_rx = Some(prog_rx);
-        // Checked after every R-bin, which is how Cancel stops the scan.
-        let cancel = self.cancel_flag.clone();
-        let progress = move |p: ScanProgress| {
-            let _ = prog_tx.send(p);
-            if cancel.load(Ordering::Relaxed) {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
-        };
-
-        let inputs = self.inputs.clone();
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            std::thread::spawn(move || {
-                let result =
-                    crate::compute::run_scan_blocking(&inputs, mol1_data, mol2_data, progress);
-                let _ = tx.send(result);
-            });
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            wasm_bindgen_futures::spawn_local(async move {
-                let result =
-                    crate::compute::run_scan_async(inputs, mol1_data, mol2_data, progress).await;
-                let _ = tx.send(result);
-            });
-        }
-    }
-
-    /// Poll for progress updates from the scan. Called each frame.
-    fn poll_progress(&mut self) {
-        let Some(rx) = &self.progress_rx else {
-            return;
-        };
-        for p in rx.try_iter() {
-            self.status = ComputeStatus::Running {
-                current_r: p.done,
-                total_r: p.total,
-            };
-            if let (Some(point), Some(cache)) = (p.point, &mut self.plot_cache) {
-                cache.push(point);
-            }
-        }
-    }
-
-    /// Poll for async file uploads. Called each frame.
-    fn poll_file_upload(&mut self) {
-        if let Some(rx) = &self.file_rx {
-            if let Ok((mol_num, name, data)) = rx.try_recv() {
-                let upload = MolUpload { name, data };
-                if mol_num == 1 {
-                    self.mol1 = Some(upload);
-                } else {
-                    self.mol2 = Some(upload);
-                }
-                self.file_rx = None;
-            }
-        }
-    }
-
-    /// Poll for background scan completion. Called each frame.
-    fn poll_result(&mut self) {
-        if let Some(rx) = &self.result_rx {
-            match rx.try_recv() {
-                Ok(Ok(result)) => {
-                    self.plot_cache = Some(PlotCache::from_result(&result));
-                    self.plot_needs_reset = true;
-                    self.result = Some(result);
-                    self.status = ComputeStatus::Idle;
-                    self.result_rx = None;
-                    self.progress_rx = None;
-                }
-                Ok(Err(e)) => {
-                    self.error = Some(format!("{e:#}"));
-                    self.abandon_scan();
-                }
-                Err(mpsc::TryRecvError::Empty) => {} // still running
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.error = Some("Scan thread terminated unexpectedly".to_string());
-                    self.abandon_scan();
-                }
-            }
-        }
-    }
-
-    /// Ends a scan that won't deliver a result. Drops the partial curve, which would
-    /// otherwise look like a finished PMF.
-    fn abandon_scan(&mut self) {
-        self.status = ComputeStatus::Idle;
-        self.result_rx = None;
-        self.progress_rx = None;
-        self.plot_cache = None;
-    }
-
-    fn download_string(&self, content: &str, filename: &str) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(path) = rfd::FileDialog::new().set_file_name(filename).save_file() {
-                if let Err(e) = std::fs::write(&path, content) {
-                    log::error!("Failed to save {filename}: {e}");
-                }
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            download_string_as_file(content, filename);
-        }
-    }
-
-    fn download_csv(&self) {
-        let Some(result) = &self.result else { return };
-        let mut csv = String::from("R/A,F/kT,U/kT\n");
-        for p in &result.points {
-            csv.push_str(&format!(
-                "{:.2},{:.4},{:.4}\n",
-                p.r, p.free_energy, p.mean_energy
-            ));
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(path) = rfd::FileDialog::new().set_file_name("pmf.csv").save_file() {
-                if let Err(e) = std::fs::write(&path, &csv) {
-                    log::error!("Failed to save CSV: {e}");
-                }
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            download_string_as_file(&csv, "pmf.csv");
-        }
-    }
-}
-
-/// Fetch a URL and return its body as bytes (WASM only).
-#[cfg(target_arch = "wasm32")]
-async fn fetch_url(url: &str) -> anyhow::Result<Vec<u8>> {
-    use wasm_bindgen::JsCast;
-    use wasm_bindgen_futures::JsFuture;
-
-    let window = web_sys::window().unwrap();
-    let resp_value = JsFuture::from(window.fetch_with_str(url))
-        .await
-        .map_err(|e| anyhow::anyhow!("fetch failed: {e:?}"))?;
-    let resp: web_sys::Response = resp_value
-        .dyn_into()
-        .map_err(|_| anyhow::anyhow!("not a Response"))?;
-    if !resp.ok() {
-        anyhow::bail!("HTTP {}", resp.status());
-    }
-    let buf = JsFuture::from(
-        resp.array_buffer()
-            .map_err(|_| anyhow::anyhow!("no array_buffer"))?,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("array_buffer failed: {e:?}"))?;
-    let array = js_sys::Uint8Array::new(&buf);
-    Ok(array.to_vec())
-}
-
-/// Trigger a browser file download from a string (WASM only).
-#[cfg(target_arch = "wasm32")]
-fn download_string_as_file(content: &str, filename: &str) {
-    use wasm_bindgen::JsCast;
-    let window = web_sys::window().unwrap();
-    let document = window.document().unwrap();
-    let blob = web_sys::Blob::new_with_str_sequence(&js_sys::Array::of1(
-        &wasm_bindgen::JsValue::from_str(content),
-    ))
-    .unwrap();
-    let url = web_sys::Url::create_object_url_with_blob(&blob).unwrap();
-    let a: web_sys::HtmlAnchorElement = document.create_element("a").unwrap().dyn_into().unwrap();
-    a.set_href(&url);
-    a.set_download(filename);
-    a.click();
-    web_sys::Url::revoke_object_url(&url).unwrap();
 }
 
 impl eframe::App for DuelloApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.poll_result();
-        self.poll_progress();
-        self.poll_file_upload();
-
         let ctx = ui.ctx().clone();
-        let is_dark = ui.visuals().dark_mode;
-
-        // Repaint periodically while a scan is running (not every frame)
-        if matches!(self.status, ComputeStatus::Running { .. }) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        self.structures.poll();
+        self.twobody.poll(&ctx);
+        egui::Panel::top("tabs").show(ui, |ui| self.ui_top_bar(ui));
+        self.manybody.tick(self.twobody.archive());
+        match self.tab {
+            Tab::Onebody => {
+                // Z and mass for the estimate, from a molecule Manybody can use.
+                let homo = self.twobody.archive().filter(|a| a.settings.homo_dimer);
+                let body = homo.map(|a| &a.bodies[0]);
+                self.onebody.ui(
+                    ui,
+                    &mut self.structures,
+                    &mut self.conditions,
+                    &mut self.forcefield,
+                    body,
+                )
+            }
+            Tab::Twobody => {
+                self.twobody
+                    .ui(ui, &self.structures, &self.conditions, &self.forcefield)
+            }
+            Tab::Manybody => self
+                .manybody
+                .ui(ui, self.twobody.archive(), &self.conditions),
         }
+        if self.poll_open() {
+            ctx.request_repaint();
+        }
+        // A busy many-body tab (running, GPU setup, late frames) needs frames.
+        if self.manybody.is_busy() {
+            ctx.request_repaint();
+        }
+    }
+}
 
-        egui::Panel::left("inputs")
-            .min_size(220.0)
-            .show_inside(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.ui_left_panel(ui);
-                });
-            });
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forcefield::{CgPolicy, Model};
+    use crate::onebody::tests::tripeptide;
+    use duello::archive::StructureFile;
 
-        egui::Panel::bottom("results")
-            .min_size(80.0)
-            .show_inside(ui, |ui| {
-                self.ui_bottom_panel(ui);
-            });
+    /// A session saved before any scan reopens with Onebody's structures
+    /// and the inputs every tab showed.
+    #[test]
+    fn a_session_without_a_scan_restores_structures_and_inputs() {
+        let mut saved = DuelloApp::blank();
+        saved.structures.replace(vec![StructureFile {
+            name: "tri.pdb".into(),
+            contents: tripeptide(),
+            ..Default::default()
+        }]);
+        (saved.conditions.ph, saved.conditions.ionic_strength) = (4.5, 0.02);
+        (
+            saved.conditions.temperature,
+            saved.conditions.protein_millimolar,
+        ) = (310.0, 2.0);
+        saved.forcefield = ForceField {
+            model: Model::KimHummer,
+            cg: CgPolicy::Single,
+        };
+        let bytes = (saved.bundle(&saved.session(), None, None))
+            .to_zip(&saved.extracts())
+            .unwrap();
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            self.ui_center_panel(ui, is_dark);
-        });
+        let mut opened = DuelloApp::blank();
+        opened.tab = Tab::Manybody;
+        opened.restore(Bundle::from_zip(&bytes).unwrap());
+        let names: Vec<_> = opened
+            .structures
+            .list()
+            .map(|(_, n)| n.to_string())
+            .collect();
+        assert_eq!(names, ["tri.pdb"]);
+        let c = &opened.conditions;
+        assert_eq!((c.ph, c.ionic_strength, c.temperature), (4.5, 0.02, 310.0));
+        assert_eq!(c.protein_millimolar, 2.0);
+        assert_eq!(opened.forcefield, saved.forcefield);
+        assert!(opened.twobody.archive().is_none());
+        assert!(opened.tab == Tab::Onebody, "no scan to show");
     }
 }

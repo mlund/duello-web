@@ -1,7 +1,24 @@
 mod app;
+mod budget;
 mod compute;
+mod conditions;
+mod experimental;
+mod files;
+mod forcefield;
+mod inputs;
+mod manybody;
+mod onebody;
+mod session_file;
+mod structures;
+#[cfg(test)]
+mod test_archive;
+mod transport;
+mod twobody;
 #[cfg(not(target_arch = "wasm32"))]
 mod version;
+mod viewer;
+mod widgets;
+mod windows;
 
 fn main() -> eframe::Result {
     #[cfg(not(target_arch = "wasm32"))]
@@ -10,6 +27,7 @@ fn main() -> eframe::Result {
         let native_options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default().with_inner_size([1024.0, 720.0]),
             renderer: eframe::Renderer::Wgpu,
+            depth_buffer: viewer::DEPTH_BITS,
             ..Default::default()
         };
         eframe::run_native(
@@ -24,7 +42,10 @@ fn main() -> eframe::Result {
         console_error_panic_hook::set_once();
         console_log::init_with_level(log::Level::Info).expect("Failed to init console_log");
 
-        let web_options = eframe::WebOptions::default();
+        let web_options = eframe::WebOptions {
+            depth_buffer: viewer::DEPTH_BITS,
+            ..Default::default()
+        };
         wasm_bindgen_futures::spawn_local(async {
             let document = web_sys::window().unwrap().document().unwrap();
             let canvas = document

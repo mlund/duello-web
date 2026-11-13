@@ -1,5 +1,5 @@
-use crate::app::{CgPolicy, ScanInputs};
-use duello::web_api::{ScanProgress, WebScanRequest, WebScanResult};
+use duello::archive::StructureFile;
+use duello::web_api::{ScanProgress, ScanSettings, WebScanRequest, WebScanResult};
 use std::ops::ControlFlow;
 
 /// Status of the computation.
@@ -10,46 +10,60 @@ pub enum ComputeStatus {
 
 pub type ComputeResult = WebScanResult;
 
-/// Build a scan request from UI inputs and PDB byte data.
-fn build_request(inputs: &ScanInputs, mol1_pdb: Vec<u8>, mol2_pdb: Vec<u8>) -> WebScanRequest {
+fn build_request(mut settings: ScanSettings, [a, b]: [StructureFile; 2]) -> WebScanRequest {
+    // As in the CLI, which compares paths: the same molecule twice is a
+    // homo-dimer, so the scan reuses one CG body and Manybody accepts it.
+    // Names don't matter; other chains make another molecule.
+    settings.homo_dimer = (&a.contents, &a.chains) == (&b.contents, &b.chains);
     WebScanRequest {
-        mol1_pdb,
-        mol2_pdb,
-        ph: inputs.ph,
-        model: inputs.model.name().to_string(),
-        single_bead: inputs.cg == CgPolicy::Single,
-        rmin: inputs.rmin,
-        rmax: inputs.rmax,
-        dr: inputs.dr,
-        molarity: inputs.molarity,
-        temperature: inputs.temperature,
-        max_ndiv: inputs.max_ndiv,
-        gradient_threshold: inputs.gradient_threshold,
-        cutoff: inputs.cutoff,
-        grid_size: inputs.grid_size,
-        homo_dimer: inputs.homo_dimer,
+        mol1_pdb: a.contents,
+        mol2_pdb: b.contents,
+        chains: [a.chains, b.chains],
+        settings,
     }
 }
 
 /// Run the full scan pipeline synchronously (for native desktop).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_scan_blocking(
-    inputs: &ScanInputs,
-    mol1_pdb: Vec<u8>,
-    mol2_pdb: Vec<u8>,
+    settings: ScanSettings,
+    pair: [StructureFile; 2],
     progress: impl Fn(ScanProgress) -> ControlFlow<()>,
 ) -> anyhow::Result<ComputeResult> {
-    duello::web_api::run_scan(build_request(inputs, mol1_pdb, mol2_pdb), Some(&progress))
+    duello::web_api::run_scan(build_request(settings, pair), Some(&progress))
 }
 
 /// Run the full scan pipeline asynchronously (for WASM).
 #[cfg(target_arch = "wasm32")]
 pub async fn run_scan_async(
-    inputs: ScanInputs,
-    mol1_pdb: Vec<u8>,
-    mol2_pdb: Vec<u8>,
+    settings: ScanSettings,
+    pair: [StructureFile; 2],
     progress: impl Fn(ScanProgress) -> ControlFlow<()>,
 ) -> anyhow::Result<ComputeResult> {
-    duello::web_api::run_scan_async(build_request(&inputs, mol1_pdb, mol2_pdb), Some(&progress))
-        .await
+    duello::web_api::run_scan_async(build_request(settings, pair), Some(&progress)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inputs::ScanInputs;
+
+    /// Picking one structure as both molecules must count as a homo-dimer,
+    /// or Manybody refuses the scan; other chains make it another molecule.
+    #[test]
+    fn same_contents_and_chains_make_a_homo_dimer() {
+        let settings = || ScanInputs::default().settings(&Default::default(), &Default::default());
+        let file = |name: &str, contents: &[u8], chains: &[&str]| StructureFile {
+            name: name.into(),
+            contents: contents.to_vec(),
+            chains: chains.iter().map(|c| c.to_string()).collect(),
+        };
+        let homo = |a: StructureFile, b: StructureFile| {
+            build_request(settings(), [a, b]).settings.homo_dimer
+        };
+        let pdb = b"ATOM ...";
+        assert!(homo(file("a", pdb, &["A"]), file("renamed", pdb, &["A"])));
+        assert!(!homo(file("a", pdb, &["A"]), file("a", pdb, &["B"])));
+        assert!(!homo(file("a", pdb, &[]), file("a", b"other", &[])));
+    }
 }
