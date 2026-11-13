@@ -19,6 +19,8 @@ pub struct DuelloApp {
     onebody: OnebodyTab,
     twobody: TwobodyTab,
     manybody: ManybodyTab,
+    /// Not yet validated: greyed out unless unlocked (see `experimental`).
+    manybody_unlocked: bool,
     file: SessionFile,
     /// Why the last open or save failed, until dismissed.
     notice: Option<String>,
@@ -55,7 +57,10 @@ impl DuelloApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_fallback_font(&cc.egui_ctx);
         crate::viewer::register(cc);
-        Self::blank()
+        Self {
+            manybody_unlocked: crate::experimental::manybody_unlocked(),
+            ..Self::blank()
+        }
     }
 
     /// No structures, default inputs, no scan or run.
@@ -68,6 +73,7 @@ impl DuelloApp {
             onebody: OnebodyTab::default(),
             twobody: TwobodyTab::new(),
             manybody: Default::default(),
+            manybody_unlocked: false,
             file: SessionFile::default(),
             notice: None,
         }
@@ -264,8 +270,11 @@ impl DuelloApp {
             .on_hover_text("Structures, force field and solution conditions shared by every tab");
         ui.selectable_value(&mut self.tab, Tab::Twobody, "Twobody")
             .on_hover_text("Orientation-averaged potential of mean force between two molecules");
-        ui.selectable_value(&mut self.tab, Tab::Manybody, "Manybody")
-            .on_hover_text("Monte Carlo of many copies of the Twobody scan's molecule");
+        ui.add_enabled_ui(self.manybody_unlocked, |ui| {
+            ui.selectable_value(&mut self.tab, Tab::Manybody, "Manybody")
+                .on_hover_text("Monte Carlo of many copies of the Twobody scan's molecule")
+                .on_disabled_hover_text("Experimental: not yet validated");
+        });
     }
 
     /// Right to left: theme, GPU, then (natively) the version, which the

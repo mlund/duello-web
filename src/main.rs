@@ -2,6 +2,7 @@ mod app;
 mod budget;
 mod compute;
 mod conditions;
+mod experimental;
 mod files;
 mod forcefield;
 mod inputs;
