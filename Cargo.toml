@@ -5,7 +5,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-duello = { git = "https://github.com/mlund/duello.git", tag = "v0.8.0", default-features = false }
+duello = { git = "https://github.com/mlund/duello.git", tag = "v0.9.0", default-features = false }
 eframe = { version = "0.37", default-features = false, features = ["wgpu"] }
 egui_plot = "0.38"
 egui_extras = { version = "0.37", default-features = false }

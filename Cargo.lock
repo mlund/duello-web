@@ -762,9 +762,9 @@ dependencies = [
 
 [[package]]
 name = "coulomb"
-version = "0.5.2"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8dc64f8062c9626c219724bdfc37c788c983ef38d82a20cf4bc2f2d779912d5"
+checksum = "11394ff8983406035dc26a92d8a7d93e92af4a09de32c3d9227e966ad298cab9"
 dependencies = [
  "mint",
  "nalgebra 0.34.2",
@@ -1099,8 +1099,8 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "duello"
-version = "0.8.0"
-source = "git+https://github.com/mlund/duello.git?tag=v0.8.0#f761e2c79a8dab3787f3e4a0bc0afc14db42418a"
+version = "0.9.0"
+source = "git+https://github.com/mlund/duello.git?tag=v0.9.0#a708c0cac908500e60a713e5fc2e9b9949575124"
 dependencies = [
  "anyhow",
  "approx",
@@ -1449,7 +1449,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1502,7 +1502,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 [[package]]
 name = "faunus"
 version = "3.0.0-beta.3"
-source = "git+https://github.com/mlund/faunus-rs.git#ae388de0d75c39139e868f52f222ab96159e9ebe"
+source = "git+https://github.com/mlund/faunus-rs.git#bb4507d1c0853418d5fc913a61f7ed8c4b4f26f4"
 dependencies = [
  "anyhow",
  "average 0.13.1",
@@ -2226,7 +2226,7 @@ dependencies = [
 [[package]]
 name = "interatomic"
 version = "0.6.1"
-source = "git+https://github.com/mlund/interatomic.git#4685c47f3f103c4001345567599bd736d841d8f8"
+source = "git+https://github.com/mlund/interatomic.git#929afdeb39975900a2c293dc72a43f577df4c960"
 dependencies = [
  "bytemuck",
  "coulomb",
@@ -3983,7 +3983,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4401,10 +4401,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5291,7 +5291,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
