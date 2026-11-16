@@ -9,10 +9,11 @@ use crate::forcefield::ForceField;
 use crate::inputs::ScanInputs;
 use crate::structures::{StructureId, Structures};
 use crate::transport::{Action, Phase, Transport};
-use crate::widgets::{placeholder, row, section};
+use crate::widgets::{pick, placeholder, row, section};
 use crate::windows;
 use curves::{Curves, Shown};
 use duello::archive::{ScanArchive, StructureFile};
+use duello::web_api::ScanBackend;
 use duello::web_api::{ScanProgress, ScanSettings};
 use duello::Subdivision;
 use pane::Pane;
@@ -29,6 +30,14 @@ const NO_GPU: &str =
 /// Typical protein separations; typed values may go past either end. Not
 /// from 0, which a drag would otherwise reach: full overlap.
 const R_SLIDER: std::ops::RangeInclusive<f64> = 5.0..=150.0;
+
+fn backend_label(use_grid: bool) -> &'static str {
+    if use_grid {
+        "Grid (fast)"
+    } else {
+        "Exact pairs"
+    }
+}
 
 fn subdivision_label(scheme: Subdivision) -> &'static str {
     match scheme {
@@ -53,6 +62,8 @@ pub struct TwobodyTab {
     /// The pair the shown result was scanned from, with the chains each kept,
     /// for export; None when unknown, e.g. opened from a CLI scan.
     scanned: Option<[(StructureId, Vec<String>); 2]>,
+    /// The last scan asked for the grid but ran on exact pairs.
+    fell_back: bool,
     status: ComputeStatus,
     result: Option<ComputeResult>,
     /// Streamed while a scan runs, then replaced by the result's.
@@ -85,6 +96,7 @@ impl TwobodyTab {
             inputs: ScanInputs::default(),
             selected: [None; 2],
             scanned: None,
+            fell_back: false,
             status: ComputeStatus::Idle,
             result: None,
             curves: None,
@@ -119,10 +131,15 @@ impl TwobodyTab {
         self.error = None;
         self.scanned = None;
         if let Some(inputs) = inputs {
-            self.inputs = ScanInputs::from_settings(inputs);
+            self.inputs.adopt_settings(inputs);
         }
+        self.fell_back = false;
         match scan {
-            Some(scan) => self.install_result(scan),
+            Some(scan) => {
+                // An opened scan has no request of its own: show what made it.
+                self.inputs.adopt_backend(scan.backend);
+                self.install_result(scan);
+            }
             None => {
                 self.result = None;
                 self.curves = None;
@@ -264,6 +281,7 @@ impl TwobodyTab {
                     .num_columns(2)
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
+                        self.ui_energy_backend(ui);
                         self.ui_angular_mesh(ui);
                         ui.end_row();
 
@@ -348,8 +366,51 @@ impl TwobodyTab {
             }
             (ComputeStatus::Idle, None) => {}
         }
+        if self.fell_back {
+            ui.weak("Grid maps didn't fit the GPU; this scan used exact pairs")
+                .on_hover_text("Try a coarser grid spacing, or keep exact pairs");
+        }
         if let Some(err) = &self.error {
             ui.colored_label(egui::Color32::RED, format!("Error: {err}"));
+        }
+    }
+
+    /// Grid maps or exact pairs, and the map spacing; rows of the Advanced grid.
+    fn ui_energy_backend(&mut self, ui: &mut egui::Ui) {
+        let inputs = &mut self.inputs;
+        row(
+            ui,
+            "Energy evaluation",
+            "Grid: short-range energies read from maps precomputed around one \
+            molecule; several times faster, slightly repulsive near contact. Exact \
+            pairs: every bead pair summed. Electrostatics are exact either way.",
+            |ui| {
+                pick(
+                    ui,
+                    "energy_backend_combo",
+                    &mut inputs.use_grid,
+                    &[true, false],
+                    |g| backend_label(*g),
+                    None,
+                )
+            },
+        );
+        if inputs.use_grid {
+            row(
+                ui,
+                "Grid spacing",
+                "Map node spacing; the bias near contact scales as its square. Each \
+                halving costs 8× the map memory, and maps that don't fit the GPU fall \
+                back to exact pairs.",
+                |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut inputs.grid.spacing)
+                            .speed(0.05)
+                            .suffix(" \u{00C5}")
+                            .range(0.25..=2.0),
+                    )
+                },
+            );
         }
     }
 
@@ -423,6 +484,7 @@ impl TwobodyTab {
         let Some(picked) = self.pair(structures) else {
             return;
         };
+        self.fell_back = false;
         self.scanned = Some(picked.map(|(id, file)| (id, file.chains.clone())));
         let pair = picked.map(|(_, file)| file.clone());
 
@@ -453,11 +515,12 @@ impl TwobodyTab {
         };
 
         let settings = self.inputs.settings(conditions, forcefield);
+        let grid = self.inputs.grid_choice();
 
         #[cfg(not(target_arch = "wasm32"))]
         {
             std::thread::spawn(move || {
-                let result = crate::compute::run_scan_blocking(settings, pair, progress);
+                let result = crate::compute::run_scan_blocking(settings, grid, pair, progress);
                 let _ = tx.send(result);
             });
         }
@@ -465,7 +528,7 @@ impl TwobodyTab {
         #[cfg(target_arch = "wasm32")]
         {
             wasm_bindgen_futures::spawn_local(async move {
-                let result = crate::compute::run_scan_async(settings, pair, progress).await;
+                let result = crate::compute::run_scan_async(settings, grid, pair, progress).await;
                 let _ = tx.send(result);
             });
         }
@@ -492,6 +555,9 @@ impl TwobodyTab {
         if let Some(rx) = &self.result_rx {
             match rx.try_recv() {
                 Ok(Ok(result)) => {
+                    // Keep the request; the note says this scan used exact pairs.
+                    self.fell_back =
+                        self.inputs.use_grid && !matches!(result.backend, ScanBackend::Grid(_));
                     self.install_result(result);
                     self.status = ComputeStatus::Idle;
                     self.result_rx = None;

@@ -1,6 +1,6 @@
 //! A small finished scan for tests, with a real table behind it.
 
-use duello::archive::{CgBody, ScanArchive, ScanSettings};
+use duello::archive::{CgBody, ScanArchive, ScanBackend, ScanSettings};
 use duello::web_api::PmfPoint;
 use duello::{AdaptiveBuilder, VirialCoeff};
 
@@ -19,6 +19,7 @@ pub fn archive() -> ScanArchive {
     ScanArchive {
         table: table(&settings),
         settings,
+        backend: ScanBackend::Gpu,
         bodies: [body(), body()],
         points,
         virial,
