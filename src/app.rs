@@ -240,10 +240,12 @@ impl DuelloApp {
         ui.separator();
         let has_scan = self.twobody.archive().is_some();
         ui.add_enabled_ui(has_scan, |ui| {
-            ui.menu_button("Export", |ui| self.twobody.export_menu(ui))
-                .response
-                .on_hover_text("The shown scan's results as plain files")
-                .on_disabled_hover_text("Run or open a scan first");
+            ui.menu_button("Export", |ui| {
+                self.twobody.export_menu(ui, &self.structures)
+            })
+            .response
+            .on_hover_text("The shown scan's results as plain files")
+            .on_disabled_hover_text("Run or open a scan first");
         });
     }
 
