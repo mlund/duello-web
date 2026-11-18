@@ -7,7 +7,7 @@ pub enum Pane {
     FreeEnergy,
     Thermodynamics,
     SolutionScan,
-    Poses,
+    Modes,
 }
 
 impl Pane {
@@ -15,7 +15,7 @@ impl Pane {
         Pane::FreeEnergy,
         Pane::Thermodynamics,
         Pane::SolutionScan,
-        Pane::Poses,
+        Pane::Modes,
     ];
 }
 
@@ -27,7 +27,7 @@ impl crate::windows::Pane for Pane {
             Pane::FreeEnergy => "Free energy",
             Pane::Thermodynamics => "Thermodynamics",
             Pane::SolutionScan => "Solution scan",
-            Pane::Poses => "Low Energy Poses",
+            Pane::Modes => "Binding Modes",
         }
     }
 
@@ -45,7 +45,10 @@ impl crate::windows::Pane for Pane {
                 "B₂ along pH, salt or temperature: one full scan per point, the other \
                  conditions from Onebody. Not saved in the session; save the CSV to keep it."
             }
-            Pane::Poses => "The lowest-energy states in the scan's table, drawn as beads",
+            Pane::Modes => {
+                "The poses that carry the B₂ attraction: similar poses grouped, ranked by \
+                 their contribution, drawn as beads"
+            }
         }
     }
 
@@ -55,7 +58,7 @@ impl crate::windows::Pane for Pane {
             Pane::FreeEnergy => (0, 0, 1),
             Pane::Thermodynamics => (1, 0, 1),
             Pane::SolutionScan => (2, 0, 1),
-            Pane::Poses => (0, 1, 3),
+            Pane::Modes => (0, 1, 3),
         };
         Slot { col, row, span }
     }
@@ -74,6 +77,6 @@ mod tests {
         use crate::windows::Pane as _;
         let slot = super::Pane::SolutionScan.slot();
         assert_eq!((slot.col, slot.row, slot.span), (2, 0, 1));
-        assert_eq!(super::Pane::Poses.slot().span, 3);
+        assert_eq!(super::Pane::Modes.slot().span, 3);
     }
 }

@@ -5,6 +5,17 @@ use duello::web_api::PmfPoint;
 use duello::{AdaptiveBuilder, VirialCoeff};
 
 pub fn archive() -> ScanArchive {
+    with_floor(5.0)
+}
+
+/// Energies 3 kJ/mol below zero at best, so some poses attract and the scan
+/// has binding modes.
+pub fn attractive() -> ScanArchive {
+    with_floor(-3.0)
+}
+
+/// `floor` is the energy (kJ/mol) about which the table varies by ±3.
+fn with_floor(floor: f64) -> ScanArchive {
     let settings = settings();
     let points: Vec<PmfPoint> = [(5.0, 1.0), (6.0, -0.5), (7.0, -0.1)]
         .map(|(r, w)| PmfPoint {
@@ -17,7 +28,7 @@ pub fn archive() -> ScanArchive {
     let virial = VirialCoeff::from_pmf(points.iter().map(|p| (p.r, p.free_energy)), None)
         .expect("three points");
     ScanArchive {
-        table: table(&settings),
+        table: table(&settings, floor),
         settings,
         backend: ScanBackend::Gpu,
         bodies: [body(), body()],
@@ -48,7 +59,7 @@ fn settings() -> ScanSettings {
 }
 
 /// Smooth energies, varying with both directions.
-fn table(s: &ScanSettings) -> duello::Table6DAdaptive<f32> {
+fn table(s: &ScanSettings, floor: f64) -> duello::Table6DAdaptive<f32> {
     let step = s.subdivision.angular_resolution(s.max_ndiv);
     let beta = 1.0 / duello::thermal_energy(s.temperature);
     let mut builder = AdaptiveBuilder::new(s.rmin, s.rmax, s.dr, step, s.max_ndiv, 1e-9, beta);
@@ -57,7 +68,7 @@ fn table(s: &ScanSettings) -> duello::Table6DAdaptive<f32> {
         for oi in 0..builder.n_omega() {
             let data: Vec<f64> = verts
                 .iter()
-                .flat_map(|a| verts.iter().map(move |b| 5.0 + a[0] - 2.0 * b[1]))
+                .flat_map(|a| verts.iter().map(move |b| floor + a[0] - 2.0 * b[1]))
                 .collect();
             builder.set_slab(ri, oi, &data);
         }

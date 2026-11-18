@@ -1,7 +1,7 @@
 mod curves;
 mod job;
+mod modes;
 mod pane;
-mod poses;
 mod reference;
 mod solution_scan;
 mod summary;
@@ -16,14 +16,17 @@ use crate::structures::{StructureId, Structures};
 use crate::transport::{Action, Phase, Transport};
 use crate::widgets::{pick, placeholder, row, section};
 use crate::windows;
+use anyhow::Context;
 use curves::{Curves, Shown};
+use duello::allatom::AllAtom;
 use duello::archive::{ScanArchive, StructureFile};
+use duello::modes::export::atom_pair;
 use duello::web_api::ScanBackend;
 use duello::web_api::{ScanProgress, ScanSettings};
 use duello::Subdivision;
 use job::{JobEvent, Retired, ScanJob};
+use modes::{ModeSave, ModesView};
 use pane::Pane;
-use poses::PosesView;
 pub use reference::Normaliser;
 use solution_scan::{SolutionScan, Start, SweepAction};
 use summary::Facts;
@@ -74,7 +77,7 @@ pub struct TwobodyTab {
     /// Streamed while a scan runs, then replaced by the result's.
     curves: Option<Curves>,
     shown: Shown,
-    poses: PosesView,
+    modes: ModesView,
     error: Option<String>,
     gpu_available: bool,
     /// The running scan, if any.
@@ -82,6 +85,8 @@ pub struct TwobodyTab {
     solution: SolutionScan,
     /// Clicked inside the sweep's pane, which lacks the inputs to act on it.
     sweep_action: Option<SweepAction>,
+    /// Likewise from the Binding Modes pane.
+    mode_save: Option<ModeSave>,
     /// Stopped scans still finishing an R-bin on the GPU.
     retired: Retired,
 }
@@ -106,12 +111,13 @@ impl TwobodyTab {
             result: None,
             curves: None,
             shown: Shown::default(),
-            poses: PosesView::default(),
+            modes: ModesView::default(),
             error: None,
             gpu_available,
             job: None,
             solution: SolutionScan::default(),
             sweep_action: None,
+            mode_save: None,
             retired: Retired::default(),
         }
     }
@@ -153,7 +159,7 @@ impl TwobodyTab {
             None => {
                 self.result = None;
                 self.curves = None;
-                self.poses.invalidate();
+                self.modes.invalidate();
             }
         }
     }
@@ -191,8 +197,15 @@ impl TwobodyTab {
             });
         });
 
-        let sweep_blocked = self.sweep_blocker(structures);
-        egui::CentralPanel::default().show(ui, |ui| self.ui_windows(ui, is_dark, sweep_blocked));
+        let context = PaneContext {
+            is_dark,
+            sweep_blocked: self.sweep_blocker(structures),
+            all_atom: self.has_scanned_structures(structures),
+        };
+        egui::CentralPanel::default().show(ui, |ui| self.ui_windows(ui, &context));
+        if let Some(action) = self.mode_save.take() {
+            self.save_modes(action, structures);
+        }
         match self.sweep_action.take() {
             Some(SweepAction::Start) => self.start_sweep(structures, conditions, forcefield),
             Some(SweepAction::Stop) => self.stop_sweep(),
@@ -202,21 +215,18 @@ impl TwobodyTab {
     }
 
     /// Each pane fetches its data inside its closure, so a collapsed pane costs nothing.
-    fn ui_windows(&mut self, ui: &mut egui::Ui, is_dark: bool, sweep_blocked: Option<&str>) {
+    fn ui_windows(&mut self, ui: &mut egui::Ui, context: &PaneContext) {
         for pane in Pane::ALL {
-            windows::show(ui, pane, |ui| {
-                self.ui_pane(ui, pane, is_dark, sweep_blocked)
-            });
+            windows::show(ui, pane, |ui| self.ui_pane(ui, pane, context));
         }
     }
 
-    fn ui_pane(
-        &mut self,
-        ui: &mut egui::Ui,
-        pane: Pane,
-        is_dark: bool,
-        sweep_blocked: Option<&str>,
-    ) {
+    fn ui_pane(&mut self, ui: &mut egui::Ui, pane: Pane, context: &PaneContext) {
+        let PaneContext {
+            is_dark,
+            sweep_blocked,
+            all_atom,
+        } = *context;
         match pane {
             Pane::FreeEnergy => match &mut self.curves {
                 Some(curves) => curves.ui(ui, &mut self.shown, is_dark),
@@ -233,8 +243,8 @@ impl TwobodyTab {
                 let normaliser = &self.inputs.normaliser;
                 self.sweep_action = self.solution.ui(ui, normaliser, sweep_blocked);
             }
-            // A scan clears the result when it starts, so poses show only once it ends.
-            Pane::Poses => self.poses.ui(ui, self.result.as_ref()),
+            // A scan clears the result when it starts, so modes show only once it ends.
+            Pane::Modes => self.mode_save = self.modes.ui(ui, self.result.as_ref(), all_atom),
         }
     }
 
@@ -685,7 +695,7 @@ impl TwobodyTab {
         }
         self.curves.get_or_insert_with(Curves::new).finish(&result);
         self.result = Some(result);
-        self.poses.invalidate();
+        self.modes.invalidate();
     }
 
     /// Save failures only reach the log, as before the scan export existed.
@@ -712,8 +722,9 @@ impl TwobodyTab {
     }
 
     /// File ▸ Export items: the shown scan's results as plain files.
-    pub fn export_menu(&self, ui: &mut egui::Ui) {
+    pub fn export_menu(&mut self, ui: &mut egui::Ui, structures: &Structures) {
         self.export_sweep(ui);
+        self.export_modes(ui, structures);
         let Some(result) = &self.result else { return };
         if ui
             .button("PMF (.csv)")
@@ -738,6 +749,61 @@ impl TwobodyTab {
         {
             self.download_string(&result.topology_yaml, "topology.yaml");
         }
+    }
+
+    /// The Binding Modes pane's saves, also under File ▸ Export.
+    fn export_modes(&mut self, ui: &mut egui::Ui, structures: &Structures) {
+        let Some(archive) = &self.result else { return };
+        if self.modes.modes(archive).modes.is_empty() {
+            ui.add_enabled(false, egui::Button::new("Binding modes"))
+                .on_disabled_hover_text(modes::NO_MODES);
+            return;
+        }
+        let all_atom = self.has_scanned_structures(structures);
+        for save in ModeSave::all(self.modes.picked()) {
+            if save.button(ui, all_atom) {
+                self.save_modes(save, structures);
+            }
+        }
+    }
+
+    /// The scanned pair is still loaded, with the chains it was scanned with.
+    fn has_scanned_structures(&self, structures: &Structures) -> bool {
+        self.scanned(structures).is_some()
+    }
+
+    /// Writes what `action` asks for, built by duello's `ModeExport` so the
+    /// bytes match `duello modes` and session extracts.
+    fn save_modes(&mut self, action: ModeSave, structures: &Structures) {
+        let Some(archive) = &self.result else { return };
+        let atoms = match action {
+            ModeSave::AllAtom => match self.scanned_atoms(structures, archive) {
+                Ok(atoms) => Some(atoms),
+                Err(e) => return self.error = Some(format!("No all-atom binding modes: {e:#}")),
+            },
+            _ => None,
+        };
+        let export = self.modes.export(archive, atoms);
+        match modes::mode_file(action, &export) {
+            Some(file) => self.download_string(&file.contents, &file.name),
+            None => self.error = Some("The scan has no such binding mode".into()),
+        }
+    }
+
+    /// The scanned structures as all-atom bodies, if still loaded as scanned.
+    fn scanned_atoms(
+        &self,
+        structures: &Structures,
+        archive: &ScanArchive,
+    ) -> anyhow::Result<[AllAtom; 2]> {
+        let ids = (self.scanned(structures)).context(modes::NEEDS_STRUCTURES)?;
+        let [Some(a), Some(b)] = ids.map(|id| structures.get(id)) else {
+            anyhow::bail!("a scanned structure was removed");
+        };
+        atom_pair(
+            [a, b].map(|f| (f.contents.as_slice(), f.chains.as_slice())),
+            archive,
+        )
     }
 
     fn export_sweep(&self, ui: &mut egui::Ui) {
@@ -774,6 +840,14 @@ impl TwobodyTab {
         let csv = duello::report::pmf_csv(&result.points);
         self.download_string(&csv, "pmf.csv");
     }
+}
+
+/// What every pane may need this frame, gathered before the windows borrow the tab.
+struct PaneContext<'a> {
+    is_dark: bool,
+    sweep_blocked: Option<&'a str>,
+    /// The scanned structures are loaded with their scanned chains.
+    all_atom: bool,
 }
 
 /// Whether a scanned structure still keeps the chains it was scanned with;

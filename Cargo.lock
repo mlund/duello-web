@@ -1099,8 +1099,8 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "duello"
-version = "0.11.1"
-source = "git+https://github.com/mlund/duello.git?tag=v0.11.1#a7f651b8a65adcf0e9a2beb257d38155f39e3b49"
+version = "0.11.2"
+source = "git+https://github.com/mlund/duello.git?tag=v0.11.2#ee76526d53fc7befb5f41ea6650d826aff5e45be"
 dependencies = [
  "anyhow",
  "approx",
