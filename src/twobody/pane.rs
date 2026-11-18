@@ -6,20 +6,27 @@ use crate::windows::Slot;
 pub enum Pane {
     FreeEnergy,
     Thermodynamics,
+    SolutionScan,
     Poses,
 }
 
 impl Pane {
-    pub const ALL: [Pane; 3] = [Pane::FreeEnergy, Pane::Thermodynamics, Pane::Poses];
+    pub const ALL: [Pane; 4] = [
+        Pane::FreeEnergy,
+        Pane::Thermodynamics,
+        Pane::SolutionScan,
+        Pane::Poses,
+    ];
 }
 
 impl crate::windows::Pane for Pane {
-    const GRID: [usize; 2] = [2, 2];
+    const GRID: [usize; 2] = [3, 2];
 
     fn title(self) -> &'static str {
         match self {
             Pane::FreeEnergy => "Free energy",
             Pane::Thermodynamics => "Thermodynamics",
+            Pane::SolutionScan => "Solution scan",
             Pane::Poses => "Low Energy Poses",
         }
     }
@@ -34,16 +41,21 @@ impl crate::windows::Pane for Pane {
                 "Second virial coefficient, Kirkwood–Buff integral and, where the pair \
                  associates, its standard free energy split"
             }
+            Pane::SolutionScan => {
+                "B₂ along pH, salt or temperature: one full scan per point, the other \
+                 conditions from Onebody. Not saved in the session; save the CSV to keep it."
+            }
             Pane::Poses => "The lowest-energy states in the scan's table, drawn as beads",
         }
     }
 
-    /// A 2 × 2 grid; the poses are wide.
+    /// A 3 × 2 grid; the poses are wide.
     fn slot(self) -> Slot {
         let (col, row, span) = match self {
             Pane::FreeEnergy => (0, 0, 1),
             Pane::Thermodynamics => (1, 0, 1),
-            Pane::Poses => (0, 1, 2),
+            Pane::SolutionScan => (2, 0, 1),
+            Pane::Poses => (0, 1, 3),
         };
         Slot { col, row, span }
     }
@@ -54,5 +66,14 @@ mod tests {
     #[test]
     fn panes_tile_the_canvas() {
         crate::windows::assert_tiled(&super::Pane::ALL);
+    }
+
+    /// Three analysis panes on top, the poses wide below.
+    #[test]
+    fn the_solution_scan_sits_beside_thermodynamics() {
+        use crate::windows::Pane as _;
+        let slot = super::Pane::SolutionScan.slot();
+        assert_eq!((slot.col, slot.row, slot.span), (2, 0, 1));
+        assert_eq!(super::Pane::Poses.slot().span, 3);
     }
 }

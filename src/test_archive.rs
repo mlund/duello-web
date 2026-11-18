@@ -1,6 +1,6 @@
 //! A small finished scan for tests, with a real table behind it.
 
-use duello::archive::{CgBody, ScanArchive, ScanBackend, ScanSettings};
+use duello::archive::{CgBody, Multipole, ScanArchive, ScanBackend, ScanSettings};
 use duello::web_api::PmfPoint;
 use duello::{AdaptiveBuilder, VirialCoeff};
 
@@ -82,5 +82,28 @@ fn body() -> CgBody {
         charges: vec![1.0, -1.0],
         radii: vec![2.0, 2.0],
         kinds: vec!["LYS".into(), "GLU".into()],
+        multipole: None,
     }
+}
+
+/// C = 58 − 7.5² = 1.75.
+pub fn multipole() -> Multipole {
+    Multipole {
+        charge: 7.5,
+        charge_sq: 58.0,
+        dipole: 40.0,
+        dipole_sq: 1700.0,
+        quadrupole: 900.0,
+        quadrupole_sq: 820_000.0,
+    }
+}
+
+/// A reference above B₂, so the pair associates and every row has a value.
+pub fn associating() -> ScanArchive {
+    let mut archive = archive();
+    archive.virial = archive
+        .virial
+        .clone()
+        .with_reference(archive.virial.b2() + 500.0);
+    archive
 }

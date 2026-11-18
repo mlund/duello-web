@@ -10,16 +10,20 @@ pub enum ComputeStatus {
 
 pub type ComputeResult = WebScanResult;
 
+/// As in the CLI, which compares paths: the same molecule twice is a homo-dimer,
+/// so the scan reuses one CG body and Manybody accepts it. Names don't matter;
+/// other chains make another molecule.
+pub fn same_molecule(a: &StructureFile, b: &StructureFile) -> bool {
+    (&a.contents, &a.chains) == (&b.contents, &b.chains)
+}
+
 /// `grid` is the panel's backend choice; `None` sums exact pairs.
 fn build_request(
     mut settings: ScanSettings,
     grid: Option<GridSpec>,
     [a, b]: [StructureFile; 2],
 ) -> WebScanRequest {
-    // As in the CLI, which compares paths: the same molecule twice is a
-    // homo-dimer, so the scan reuses one CG body and Manybody accepts it.
-    // Names don't matter; other chains make another molecule.
-    settings.homo_dimer = (&a.contents, &a.chains) == (&b.contents, &b.chains);
+    settings.homo_dimer = same_molecule(&a, &b);
     WebScanRequest {
         mol1_pdb: a.contents,
         mol2_pdb: b.contents,

@@ -1,6 +1,11 @@
 mod curves;
+mod job;
 mod pane;
 mod poses;
+mod reference;
+mod solution_scan;
+mod summary;
+mod sweep;
 mod thermo;
 use crate::compute::{ComputeResult, ComputeStatus};
 use crate::conditions::SolutionConditions;
@@ -16,12 +21,12 @@ use duello::archive::{ScanArchive, StructureFile};
 use duello::web_api::ScanBackend;
 use duello::web_api::{ScanProgress, ScanSettings};
 use duello::Subdivision;
+use job::{JobEvent, Retired, ScanJob};
 use pane::Pane;
 use poses::PosesView;
-use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::Arc;
+pub use reference::Normaliser;
+use solution_scan::{SolutionScan, Start, SweepAction};
+use summary::Facts;
 
 /// Why Run is disabled, kept on the status line while it applies.
 const NO_GPU: &str =
@@ -72,13 +77,13 @@ pub struct TwobodyTab {
     poses: PosesView,
     error: Option<String>,
     gpu_available: bool,
-    /// Channel for receiving results from background scan thread.
-    result_rx: Option<mpsc::Receiver<anyhow::Result<ComputeResult>>>,
-    /// Progress and PMF points, one message per finished R-bin.
-    progress_rx: Option<mpsc::Receiver<ScanProgress>>,
-    /// Set by Stop. One per scan, so a new scan can't un-cancel an abandoned one
-    /// that has yet to reach its next R-bin.
-    cancel_flag: Arc<AtomicBool>,
+    /// The running scan, if any.
+    job: Option<ScanJob>,
+    solution: SolutionScan,
+    /// Clicked inside the sweep's pane, which lacks the inputs to act on it.
+    sweep_action: Option<SweepAction>,
+    /// Stopped scans still finishing an R-bin on the GPU.
+    retired: Retired,
 }
 
 impl TwobodyTab {
@@ -104,9 +109,10 @@ impl TwobodyTab {
             poses: PosesView::default(),
             error: None,
             gpu_available,
-            result_rx: None,
-            progress_rx: None,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
+            job: None,
+            solution: SolutionScan::default(),
+            sweep_action: None,
+            retired: Retired::default(),
         }
     }
 
@@ -118,9 +124,10 @@ impl TwobodyTab {
     /// Drains background channels; keeps repainting while a scan runs, since
     /// its progress arrives off the UI thread.
     pub fn poll(&mut self, ctx: &egui::Context) {
-        self.poll_result();
-        self.poll_progress();
-        if matches!(self.status, ComputeStatus::Running { .. }) {
+        self.poll_job();
+        self.solution.poll();
+        self.retired.poll();
+        if !self.idle() || self.retired.busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
     }
@@ -129,6 +136,9 @@ impl TwobodyTab {
     /// tabs' inputs it was saved with.
     pub fn show_opened(&mut self, scan: Option<ScanArchive>, inputs: Option<&ScanSettings>) {
         self.error = None;
+        // A sweep belongs to the structures it ran on, which the session replaces.
+        self.stop_sweep();
+        self.solution = SolutionScan::default();
         self.scanned = None;
         if let Some(inputs) = inputs {
             self.inputs.adopt_settings(inputs);
@@ -181,26 +191,48 @@ impl TwobodyTab {
             });
         });
 
-        egui::CentralPanel::default().show(ui, |ui| self.ui_windows(ui, is_dark));
-    }
-
-    /// Each pane fetches its data inside its closure, so a collapsed pane costs nothing.
-    fn ui_windows(&mut self, ui: &mut egui::Ui, is_dark: bool) {
-        for pane in Pane::ALL {
-            windows::show(ui, pane, |ui| self.ui_pane(ui, pane, is_dark));
+        let sweep_blocked = self.sweep_blocker(structures);
+        egui::CentralPanel::default().show(ui, |ui| self.ui_windows(ui, is_dark, sweep_blocked));
+        match self.sweep_action.take() {
+            Some(SweepAction::Start) => self.start_sweep(structures, conditions, forcefield),
+            Some(SweepAction::Stop) => self.stop_sweep(),
+            Some(SweepAction::Save) => self.download_sweep(),
+            None => {}
         }
     }
 
-    fn ui_pane(&mut self, ui: &mut egui::Ui, pane: Pane, is_dark: bool) {
+    /// Each pane fetches its data inside its closure, so a collapsed pane costs nothing.
+    fn ui_windows(&mut self, ui: &mut egui::Ui, is_dark: bool, sweep_blocked: Option<&str>) {
+        for pane in Pane::ALL {
+            windows::show(ui, pane, |ui| {
+                self.ui_pane(ui, pane, is_dark, sweep_blocked)
+            });
+        }
+    }
+
+    fn ui_pane(
+        &mut self,
+        ui: &mut egui::Ui,
+        pane: Pane,
+        is_dark: bool,
+        sweep_blocked: Option<&str>,
+    ) {
         match pane {
             Pane::FreeEnergy => match &mut self.curves {
                 Some(curves) => curves.ui(ui, &mut self.shown, is_dark),
                 None => placeholder(ui, "Load structures in Onebody and run a scan"),
             },
             Pane::Thermodynamics => match &self.result {
-                Some(result) => thermo::thermodynamics(ui, result),
+                Some(result) => {
+                    let summary = Facts::of(result).summary(&self.inputs.normaliser);
+                    thermo::thermodynamics(ui, &summary, result.settings.homo_dimer)
+                }
                 None => placeholder(ui, "Available once the scan finishes"),
             },
+            Pane::SolutionScan => {
+                let normaliser = &self.inputs.normaliser;
+                self.sweep_action = self.solution.ui(ui, normaliser, sweep_blocked);
+            }
             // A scan clears the result when it starts, so poses show only once it ends.
             Pane::Poses => self.poses.ui(ui, self.result.as_ref()),
         }
@@ -255,6 +287,9 @@ impl TwobodyTab {
             .show(ui, |ui| {
                 self.ui_rmin_auto(ui);
                 self.ui_r_range(ui);
+                let pair = self.pair(structures).map(|[a, b]| [a.1, b.1]);
+                let homodimer = pair.is_some_and(|[a, b]| crate::compute::same_molecule(a, b));
+                self.inputs.normaliser.ui(ui, homodimer);
 
                 ui.label("\u{0394}R");
                 ui.add(
@@ -328,7 +363,9 @@ impl TwobodyTab {
         match TRANSPORT.ui(ui, self.phase(), blocked, None) {
             Some(Action::Start) => self.start_scan(structures, conditions, forcefield),
             Some(Action::Stop) => {
-                self.cancel_flag.store(true, Ordering::Relaxed);
+                if let Some(job) = self.job.take() {
+                    self.retired.retire(job);
+                }
                 self.abandon_scan();
             }
             _ => {}
@@ -336,8 +373,44 @@ impl TwobodyTab {
         self.ui_status(ui, blocked);
     }
 
-    /// Why a scan can't start, if it can't.
+    /// Why the main scan can't start: one GPU job at a time.
     fn start_blocker(&self, structures: &Structures) -> Option<&'static str> {
+        if self.solution.running() {
+            Some("A Solution scan is running; stop it to scan here")
+        } else {
+            self.gpu_blocker()
+                .or_else(|| self.inputs_blocker(structures))
+        }
+    }
+
+    fn sweep_blocker(&self, structures: &Structures) -> Option<&'static str> {
+        if self.job.is_some() {
+            Some("The main scan is running")
+        } else {
+            self.gpu_blocker()
+                .or_else(|| self.inputs_blocker(structures))
+        }
+    }
+
+    /// A stopped scan holds the GPU until its R-bin ends.
+    fn gpu_blocker(&self) -> Option<&'static str> {
+        (self.retired.busy()).then_some("A stopped scan is finishing its last separation")
+    }
+
+    fn stop_sweep(&mut self) {
+        if let Some(job) = self.solution.stop() {
+            self.retired.retire(job);
+        }
+    }
+
+    fn download_sweep(&self) {
+        if let Some(csv) = self.solution.csv(&self.inputs.normaliser) {
+            self.download_string(&csv, "solution_scan.csv");
+        }
+    }
+
+    /// Why no scan of the picked pair can start, if none can.
+    fn inputs_blocker(&self, structures: &Structures) -> Option<&'static str> {
         if !self.gpu_available {
             Some(NO_GPU)
         } else if self.pair(structures).is_none() {
@@ -475,6 +548,23 @@ impl TwobodyTab {
             });
     }
 
+    /// The pair and settings as the main Run would take them.
+    fn start_sweep(
+        &mut self,
+        structures: &Structures,
+        conditions: &SolutionConditions,
+        forcefield: &ForceField,
+    ) {
+        let Some(picked) = self.pair(structures) else {
+            return;
+        };
+        self.solution.start(Start {
+            base: self.inputs.settings(conditions, forcefield),
+            grid: self.inputs.grid_choice(),
+            pair: picked.map(|(_, file)| file.clone()),
+        });
+    }
+
     fn start_scan(
         &mut self,
         structures: &Structures,
@@ -490,89 +580,45 @@ impl TwobodyTab {
 
         self.error = None;
         self.result = None;
-        self.cancel_flag = Arc::new(AtomicBool::new(false));
         self.status = ComputeStatus::Running {
             current_r: 0,
             total_r: 1,
         };
-
         // Empty until the first R-bin arrives; the plot then grows with the scan.
         self.curves = Some(Curves::new());
-
-        let (tx, rx) = mpsc::channel();
-        self.result_rx = Some(rx);
-        let (prog_tx, prog_rx) = mpsc::channel();
-        self.progress_rx = Some(prog_rx);
-        // Checked after every R-bin, which is how Stop ends the scan.
-        let cancel = self.cancel_flag.clone();
-        let progress = move |p: ScanProgress| {
-            let _ = prog_tx.send(p);
-            if cancel.load(Ordering::Relaxed) {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
-        };
-
         let settings = self.inputs.settings(conditions, forcefield);
-        let grid = self.inputs.grid_choice();
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            std::thread::spawn(move || {
-                let result = crate::compute::run_scan_blocking(settings, grid, pair, progress);
-                let _ = tx.send(result);
-            });
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            wasm_bindgen_futures::spawn_local(async move {
-                let result = crate::compute::run_scan_async(settings, grid, pair, progress).await;
-                let _ = tx.send(result);
-            });
-        }
+        self.job = Some(ScanJob::start(settings, self.inputs.grid_choice(), pair));
     }
 
-    /// Poll for progress updates from the scan. Called each frame.
-    fn poll_progress(&mut self) {
-        let Some(rx) = &self.progress_rx else {
-            return;
-        };
-        for p in rx.try_iter() {
-            self.status = ComputeStatus::Running {
-                current_r: p.done,
-                total_r: p.total,
-            };
-            if let (Some(point), Some(curves)) = (p.point, &mut self.curves) {
-                curves.push(point);
-            }
-        }
-    }
-
-    /// Poll for background scan completion. Called each frame.
-    fn poll_result(&mut self) {
-        if let Some(rx) = &self.result_rx {
-            match rx.try_recv() {
-                Ok(Ok(result)) => {
+    /// Drains the running scan's events. Called each frame.
+    fn poll_job(&mut self) {
+        let Some(job) = &self.job else { return };
+        for event in job.poll() {
+            match event {
+                JobEvent::Progress(p) => self.show_progress(p),
+                JobEvent::Done(Ok(result)) => {
                     // Keep the request; the note says this scan used exact pairs.
                     self.fell_back =
                         self.inputs.use_grid && !matches!(result.backend, ScanBackend::Grid(_));
-                    self.install_result(result);
+                    self.install_result(*result);
                     self.status = ComputeStatus::Idle;
-                    self.result_rx = None;
-                    self.progress_rx = None;
+                    self.job = None;
                 }
-                Ok(Err(e)) => {
+                JobEvent::Done(Err(e)) => {
                     self.error = Some(format!("{e:#}"));
                     self.abandon_scan();
                 }
-                Err(mpsc::TryRecvError::Empty) => {} // still running
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.error = Some("Scan thread terminated unexpectedly".to_string());
-                    self.abandon_scan();
-                }
             }
+        }
+    }
+
+    fn show_progress(&mut self, p: ScanProgress) {
+        self.status = ComputeStatus::Running {
+            current_r: p.done,
+            total_r: p.total,
+        };
+        if let (Some(point), Some(curves)) = (p.point, &mut self.curves) {
+            curves.push(point);
         }
     }
 
@@ -580,8 +626,7 @@ impl TwobodyTab {
     /// otherwise look like a finished PMF.
     fn abandon_scan(&mut self) {
         self.status = ComputeStatus::Idle;
-        self.result_rx = None;
-        self.progress_rx = None;
+        self.job = None;
         self.curves = None;
     }
 
@@ -659,7 +704,7 @@ impl TwobodyTab {
 
     /// No scan running, so another can be opened.
     pub fn idle(&self) -> bool {
-        matches!(self.status, ComputeStatus::Idle)
+        matches!(self.status, ComputeStatus::Idle) && !self.solution.running()
     }
 
     pub fn gpu_available(&self) -> bool {
@@ -668,6 +713,7 @@ impl TwobodyTab {
 
     /// File ▸ Export items: the shown scan's results as plain files.
     pub fn export_menu(&self, ui: &mut egui::Ui) {
+        self.export_sweep(ui);
         let Some(result) = &self.result else { return };
         if ui
             .button("PMF (.csv)")
@@ -691,6 +737,19 @@ impl TwobodyTab {
             .clicked()
         {
             self.download_string(&result.topology_yaml, "topology.yaml");
+        }
+    }
+
+    fn export_sweep(&self, ui: &mut egui::Ui) {
+        if !self.solution.has_points() {
+            return;
+        }
+        if ui
+            .button("Solution scan (.csv)")
+            .on_hover_text(solution_scan::CSV_TIP)
+            .clicked()
+        {
+            self.download_sweep();
         }
     }
 
