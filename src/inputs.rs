@@ -1,5 +1,6 @@
 use crate::conditions::SolutionConditions;
 use crate::forcefield::ForceField;
+use crate::twobody::Normaliser;
 use duello::web_api::{GridSpec, ScanBackend, ScanSettings};
 use duello::Subdivision;
 
@@ -22,6 +23,8 @@ pub struct ScanInputs {
     pub use_grid: bool,
     /// Kept while exact pairs are chosen, so switching back restores it.
     pub grid: GridSpec,
+    /// B₂ʰˢ for B₂*; display only, so not a scan setting.
+    pub normaliser: Normaliser,
 }
 
 impl ScanInputs {
@@ -94,6 +97,7 @@ impl Default for ScanInputs {
             grid_size: 200,
             use_grid: true,
             grid: GridSpec::default(),
+            normaliser: Normaliser::default(),
         }
     }
 }
@@ -109,6 +113,19 @@ mod tests {
         conditions.ph = 4.5;
         conditions.ionic_strength = 0.02;
         conditions
+    }
+
+    /// B₂ʰˢ only re-renders: the scan's settings, which decide what is stale
+    /// and what a session saves, don't see it.
+    #[test]
+    fn the_normaliser_is_not_a_scan_setting() {
+        let (conditions, forcefield) = (conditions(), ForceField::default());
+        let before = ScanInputs::default().settings(&conditions, &forcefield);
+        let inputs = ScanInputs {
+            normaliser: Normaliser::Custom { b2_hs: 1.0e5 },
+            ..Default::default()
+        };
+        assert_eq!(inputs.settings(&conditions, &forcefield), before);
     }
 
     /// Onebody owns the solution and force field, so the scan takes them from there.

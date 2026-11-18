@@ -81,3 +81,14 @@ pub fn section(ui: &mut egui::Ui) {
     ui.separator();
     ui.add_space(2.0);
 }
+
+/// Draws `add` once without a window or renderer, to check a pane lays out.
+#[cfg(test)]
+pub fn headless(mut add: impl FnMut(&mut egui::Ui)) {
+    let ctx = egui::Context::default();
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| add(ui));
+    });
+    // No renderer here to take the font atlas.
+    output.textures_delta.clear();
+}
