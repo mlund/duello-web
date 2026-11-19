@@ -4,7 +4,7 @@ use crate::widgets::{curve_color, curve_legend, pick, refit};
 use duello::archive::ScanArchive;
 use duello::web_api::PmfPoint;
 use duello::VirialCoeff;
-use egui_plot::{Line, MarkerShape, Plot, PlotPoint, Points};
+use egui_plot::{Line, MarkerShape, Plot, PlotBounds, PlotPoint, Points};
 
 /// Which curve the window plots.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -61,6 +61,22 @@ impl Shown {
         }
     }
 
+    /// B₂₂ by start is read at small R, so the wall stays in view.
+    fn is_cut(self) -> bool {
+        self != Shown::B2Start
+    }
+
+    /// The tip, plus where the axes start for views that cut them.
+    fn full_tip(self) -> String {
+        if !self.is_cut() {
+            return self.tip().into();
+        }
+        format!(
+            "{}\n\nOnce the scan ends, axes start where w(R) < {WALL} kT; double-click to show all",
+            self.tip()
+        )
+    }
+
     fn y_label(self) -> &'static str {
         match self {
             Shown::FreeEnergy => "Energy (kT)",
@@ -70,6 +86,9 @@ impl Shown {
         }
     }
 }
+
+/// w(R) in kT above which the axes leave R out: contact walls reach hundreds of kT.
+const WALL: f64 = 10.0;
 
 /// A series' colour for the theme, dark or not.
 type Colour = fn(bool) -> egui::Color32;
@@ -100,6 +119,8 @@ pub struct Curves {
     b2: Vec<PlotPoint>,
     /// B₂₂ by scan start R′; likewise only once finished.
     b2_start: Vec<PlotPoint>,
+    /// The whole PMF is in; only then is the wall cut final.
+    finished: bool,
     /// Refit the axes next frame: a scan started or ended, or another curve shows.
     reset: bool,
 }
@@ -133,13 +154,15 @@ impl Curves {
         let sigma = archive.virial.sigma();
         self.b2 = plot_points(VirialCoeff::running(&archive.points, sigma));
         self.b2_start = plot_points(VirialCoeff::by_start(&archive.points, sigma));
+        self.finished = true;
     }
 
     /// A picker over the curves, then the picked one's plot.
     pub fn ui(&mut self, ui: &mut egui::Ui, shown: &mut Shown, is_dark: bool) {
         let before = *shown;
         ui.horizontal(|ui| {
-            ui.label("Show").on_hover_text(shown.tip());
+            let tip = shown.full_tip();
+            ui.label("Show").on_hover_text(&tip);
             pick(
                 ui,
                 "twobody_curve",
@@ -148,7 +171,7 @@ impl Curves {
                 |s| s.label(),
                 Some(Shown::tip),
             )
-            .on_hover_text(shown.tip());
+            .on_hover_text(tip);
         });
         // Other units, so the old axes would hide the new curve.
         self.reset |= *shown != before;
@@ -156,9 +179,15 @@ impl Curves {
             .legend(curve_legend())
             .x_axis_label("Mass-centre separation, R (Å)")
             .y_axis_label(shown.y_label());
+        // Only on reset, so the user's pan and zoom stand; read it before
+        // `refit` clears it.
+        let fit = self.reset.then(|| self.bounds(*shown)).flatten();
         let plot = refit(plot, &mut self.reset);
         let series = self.series(*shown);
         plot.show(ui, |plot_ui| {
+            if let Some(bounds) = fit {
+                plot_ui.set_plot_bounds(bounds);
+            }
             for (name, data, colour, shape) in series {
                 let color = colour(is_dark);
                 plot_ui.line(Line::new(name, data).color(color).width(3.0_f32));
@@ -167,6 +196,15 @@ impl Curves {
                 plot_ui.points(points.radius(4.0_f32));
             }
         });
+    }
+
+    /// Axes for `shown`, cut where w(R) drops below the wall.
+    fn bounds(&self, shown: Shown) -> Option<PlotBounds> {
+        if !self.finished || !shown.is_cut() {
+            return None;
+        }
+        let series: Vec<&[PlotPoint]> = self.series(shown).iter().map(|s| s.1).collect();
+        fit_bounds(&self.free_energy, &series, WALL)
     }
 
     fn series(&self, shown: Shown) -> Vec<Series<'_>> {
@@ -190,6 +228,29 @@ fn plot_points(xy: Vec<(f64, f64)>) -> Vec<PlotPoint> {
     xy.into_iter().map(|(x, y)| PlotPoint::new(x, y)).collect()
 }
 
+/// Axes from the first R where w(R) < `wall` to the last R, so the steep
+/// contact wall doesn't squash the well; y spans every series in that range.
+fn fit_bounds(free_energy: &[PlotPoint], series: &[&[PlotPoint]], wall: f64) -> Option<PlotBounds> {
+    let from = free_energy.iter().find(|p| p.y < wall)?.x;
+    let to = free_energy.last()?.x;
+    let ys = series
+        .iter()
+        .flat_map(|s| s.iter())
+        .filter(|p| (from..=to).contains(&p.x) && p.y.is_finite())
+        .map(|p| p.y);
+    let (low, high) = ys.fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), y| {
+        (l.min(y), h.max(y))
+    });
+    if from >= to || low >= high {
+        return None;
+    }
+    let pad = 0.05 * (high - low);
+    Some(PlotBounds::from_min_max(
+        [from, low - pad],
+        [to, high + pad],
+    ))
+}
+
 /// −dw/dR (kT/Å) by central difference; the end points lack a neighbour.
 fn mean_force(w: &[PlotPoint]) -> Vec<PlotPoint> {
     w.windows(3)
@@ -211,6 +272,71 @@ mod tests {
         curves.finish(&archive);
         let last = curves.b2.last().expect("a point per R ≥ σ").y;
         assert!((last - archive.virial.b2()).abs() < 1e-9 * archive.virial.b2().abs());
+    }
+
+    fn points(xy: &[(f64, f64)]) -> Vec<PlotPoint> {
+        xy.iter().map(|&(x, y)| PlotPoint::new(x, y)).collect()
+    }
+
+    /// The 50 kT contact point is cut; y spans −2…5 kT padded by 5 % of 7 kT.
+    #[test]
+    fn axes_start_below_the_wall() {
+        let w = points(&[(10.0, 50.0), (11.0, 5.0), (12.0, -2.0), (13.0, 0.0)]);
+        let bounds = fit_bounds(&w, &[&w], 10.0).expect("w dips below the wall");
+        assert_eq!([bounds.min()[0], bounds.max()[0]], [11.0, 13.0]);
+        let [low, high] = [bounds.min()[1], bounds.max()[1]];
+        assert!(
+            (low + 2.35).abs() < 1e-12 && (high - 5.35).abs() < 1e-12,
+            "{low} {high}"
+        );
+    }
+
+    /// Nothing to cut, or nothing to show: leave the axes to auto-fit.
+    #[test]
+    fn no_fit_without_a_well_or_data() {
+        let wall = points(&[(10.0, 50.0), (11.0, 20.0)]);
+        assert!(fit_bounds(&wall, &[&wall], 10.0).is_none());
+        let w = points(&[(10.0, 50.0), (11.0, 5.0)]);
+        assert!(
+            fit_bounds(&w, &[&[]], 10.0).is_none(),
+            "B₂₂ before the scan ends"
+        );
+    }
+
+    /// Mean force has no point at the first R, yet starts where w does.
+    #[test]
+    fn every_view_cuts_where_w_crosses_the_wall() {
+        let mut curves = Curves::new();
+        curves.finished = true;
+        curves.free_energy = points(&[(10.0, 50.0), (11.0, 5.0), (12.0, -2.0), (13.0, 0.0)]);
+        curves.mean_force = points(&[(11.0, 30.0), (12.0, 2.5)]);
+        let bounds = curves.bounds(Shown::MeanForce).unwrap();
+        assert_eq!([bounds.min()[0], bounds.max()[0]], [11.0, 13.0]);
+        assert_eq!(bounds.max()[1], 30.0 + 0.05 * 27.5);
+    }
+
+    /// A streaming scan keeps auto-bounds so the plot grows with it; B₂₂ by
+    /// start is about the small-R end, so it is never cut.
+    #[test]
+    fn only_finished_scans_cut_and_never_b2_by_start() {
+        let archive = crate::test_archive::archive();
+        let mut curves = Curves::new();
+        archive.points.iter().for_each(|&p| curves.push(p));
+        assert!(
+            curves.bounds(Shown::FreeEnergy).is_none(),
+            "still streaming"
+        );
+        curves.finish(&archive);
+        assert!(curves.bounds(Shown::B2Start).is_none());
+    }
+
+    /// A lone point or flat line has no extent to fit; auto-bounds handles it.
+    #[test]
+    fn degenerate_ranges_are_not_fitted() {
+        let last_only = points(&[(10.0, 50.0), (11.0, 0.0)]);
+        assert!(fit_bounds(&last_only, &[&last_only], 10.0).is_none());
+        let flat = points(&[(10.0, 0.0), (11.0, 0.0)]);
+        assert!(fit_bounds(&flat, &[&flat], 10.0).is_none());
     }
 
     #[test]
