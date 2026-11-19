@@ -2,6 +2,7 @@
 
 use super::reference::{Normaliser, Reduced};
 use super::summary::{Facts, Key, Summary};
+use super::vant_hoff::VantHoff;
 use duello::archive::ScanArchive;
 use duello::web_api::ScanSettings;
 
@@ -192,6 +193,9 @@ impl SweepPoints {
         for (_, summary) in &summaries {
             csv.push_str(&line(summary, false));
         }
+        if let Some(fit) = vant_hoff(self.sweep.variable, &curve(&summaries, Key::Kd)) {
+            csv.push_str(&fit.csv_comment());
+        }
         Some(csv)
     }
 
@@ -222,6 +226,13 @@ impl SweepPoints {
         );
         Ok(())
     }
+}
+
+/// The van 't Hoff fit of `kd` as `[x, K_d]`, for temperature sweeps only.
+pub fn vant_hoff(variable: Variable, kd: &[[f64; 2]]) -> Option<VantHoff> {
+    (variable == Variable::Temperature)
+        .then(|| VantHoff::fit(kd))
+        .flatten()
 }
 
 /// `[x, value]` of `key` where it has one.

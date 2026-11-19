@@ -1,7 +1,7 @@
 //! Manybody plots: the energy trace, the scattering curves and g(r). Views,
 //! log scaling and error bars stay in here.
 
-use crate::widgets::{curve_color, curve_legend};
+use crate::widgets::{curve_color, curve_legend, log_scaled};
 use duello::nbody::{RdfCurve, ScatteringCurve};
 use egui_plot::{Line, MarkerShape, Plot, PlotPoints, Points};
 
@@ -239,17 +239,8 @@ pub fn energy(ui: &mut egui::Ui, trace: &[[f64; 2]], follow: &mut bool, key: (u6
     }
 }
 
-/// egui_plot has no log axes, so log scales plot log₁₀ of the data;
-/// non-positive values have no logarithm and are dropped.
-fn scaled(v: f64, log: bool) -> Option<f64> {
-    match log {
-        false => Some(v),
-        true => (v > 0.0).then(|| v.log10()),
-    }
-}
-
 fn point(q: f64, v: f64, axes: LogAxes) -> Option<[f64; 2]> {
-    Some([scaled(q, axes.x)?, scaled(v, axes.y)?])
+    Some([log_scaled(q, axes.x)?, log_scaled(v, axes.y)?])
 }
 
 fn to_points(q: &[f64], values: &[f64], axes: LogAxes) -> Vec<[f64; 2]> {

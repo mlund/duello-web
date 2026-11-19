@@ -61,6 +61,15 @@ pub fn refit<'a>(plot: egui_plot::Plot<'a>, reset: &mut bool) -> egui_plot::Plot
     }
 }
 
+/// egui_plot has no log axes, so log scales plot log₁₀ of the data;
+/// non-positive values have no logarithm and are dropped.
+pub fn log_scaled(v: f64, log: bool) -> Option<f64> {
+    match log {
+        false => Some(v),
+        true => (v > 0.0).then(|| v.log10()),
+    }
+}
+
 /// The tabs' main curve colour, so their plots read alike.
 pub fn curve_color(dark_mode: bool) -> egui::Color32 {
     if dark_mode {

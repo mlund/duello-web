@@ -1156,6 +1156,7 @@ dependencies = [
  "glam 0.30.10",
  "js-sys",
  "log",
+ "nalgebra 0.34.2",
  "pollster 0.4.0",
  "rfd",
  "ureq",
