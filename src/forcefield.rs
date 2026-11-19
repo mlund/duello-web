@@ -17,8 +17,13 @@ pub enum Model {
 }
 
 impl Model {
-    /// Every selectable model; the picker and name lookup share this list.
+    /// Every model a session may name; lookup uses this so old sessions still open.
     pub const ALL: [Model; 3] = [Model::Calvados3, Model::KimHummer, Model::Pasquier];
+
+    /// Retired models stay readable but leave the picker.
+    fn retired(self) -> bool {
+        self == Model::Pasquier
+    }
 
     pub fn name(&self) -> &str {
         match self {
@@ -135,13 +140,14 @@ impl ForceField {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        let offered: Vec<Model> = Model::ALL.into_iter().filter(|m| !m.retired()).collect();
         grid("forcefield").show(ui, |ui| {
             row(ui, "Model", MODEL_TIP, |ui| {
                 pick(
                     ui,
                     "model_combo",
                     &mut self.model,
-                    &Model::ALL,
+                    &offered,
                     Model::label,
                     None,
                 )
@@ -168,6 +174,14 @@ mod tests {
 
     fn settings(forcefield: &ForceField) -> ScanSettings {
         ScanInputs::default().settings(&SolutionConditions::default(), forcefield)
+    }
+
+    /// Pasquier is retired from the picker, yet sessions saved with it still open.
+    #[test]
+    fn pasquier_is_hidden_but_still_restores() {
+        assert!(Model::Pasquier.retired());
+        assert!(!Model::Calvados3.retired() && !Model::KimHummer.retired());
+        assert_eq!(Model::from_name("pasquier"), Some(Model::Pasquier));
     }
 
     #[test]
