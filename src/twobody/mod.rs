@@ -7,6 +7,7 @@ mod solution_scan;
 mod summary;
 mod sweep;
 mod thermo;
+mod vant_hoff;
 use crate::compute::{ComputeResult, ComputeStatus};
 use crate::conditions::SolutionConditions;
 use crate::files::save_file;
