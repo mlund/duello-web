@@ -2,7 +2,7 @@
 //! session. Borrowed, so a pane computes only what it draws and nothing is
 //! copied per frame.
 
-use duello::nbody::{NBodyRun, RdfCurve, RunRecord, RunStats, ScatteringCurve};
+use duello::nbody::{NBodyRun, RdfAnalysis, RdfCurve, RunRecord, RunStats, ScatteringCurve};
 use std::borrow::Cow;
 
 /// A finished run from a session file; it can be shown and saved again.
@@ -35,6 +35,14 @@ impl<'a> Results<'a> {
         match self {
             Self::Live(run) => Cow::Owned(run.pair_correlation()),
             Self::Opened(o) => Cow::Borrowed(&o.record.rdf),
+        }
+    }
+
+    /// g(r) with its Kirkwood–Buff views; rebuilt on each call.
+    pub fn rdf_analysis(self) -> RdfAnalysis {
+        match self {
+            Self::Live(run) => run.rdf_analysis(),
+            Self::Opened(o) => o.record.rdf_analysis(),
         }
     }
 

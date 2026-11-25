@@ -51,10 +51,10 @@ fn settings() -> ScanSettings {
         temperature: 298.15,
         max_ndiv: 0,
         gradient_threshold: 0.5,
-        cutoff: 30.0,
         grid_size: 100,
         homo_dimer: true,
         subdivision: Default::default(),
+        coulomb_cutoff: None,
     }
 }
 

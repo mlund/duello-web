@@ -564,9 +564,9 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "cgkitten"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61743d20e18a41b4b48674af5be493a25bde1a52e599961db4c9a7c41f246b00"
+checksum = "2d5dd4482343e048c665a8ebe9edffd7650a5ce1b9c8b264c7621bcd3e5f86ff"
 dependencies = [
  "kdtree",
  "log",
@@ -762,9 +762,9 @@ dependencies = [
 
 [[package]]
 name = "coulomb"
-version = "0.5.4"
+version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11394ff8983406035dc26a92d8a7d93e92af4a09de32c3d9227e966ad298cab9"
+checksum = "df3ddf8d893cddcd9d5abbc8999eba6c40f9020e069fef86cb6c0fe88d86ee40"
 dependencies = [
  "mint",
  "nalgebra 0.34.2",
@@ -1099,8 +1099,8 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "duello"
-version = "0.11.2"
-source = "git+https://github.com/mlund/duello.git?tag=v0.11.2#ee76526d53fc7befb5f41ea6650d826aff5e45be"
+version = "0.12.0"
+source = "git+https://github.com/mlund/duello.git?tag=v0.12.0#3f7c8184abc141822044ad6e792e1016da7c4964"
 dependencies = [
  "anyhow",
  "approx",
@@ -1503,7 +1503,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 [[package]]
 name = "faunus"
 version = "3.0.0-beta.3"
-source = "git+https://github.com/mlund/faunus-rs.git#bb4507d1c0853418d5fc913a61f7ed8c4b4f26f4"
+source = "git+https://github.com/mlund/faunus-rs.git#36a15bbf5921c3b21688b1b71ed08f009f7b5203"
 dependencies = [
  "anyhow",
  "average 0.13.1",
@@ -2061,8 +2061,8 @@ dependencies = [
 
 [[package]]
 name = "icotable"
-version = "0.2.0"
-source = "git+https://github.com/mlund/icotable.git#04e40bac78978118aff4a846921dd8a6af34a6cc"
+version = "0.3.0"
+source = "git+https://github.com/mlund/icotable.git#68468f24956562ce131dc91769b5e0d9eae34bf9"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2226,8 +2226,8 @@ dependencies = [
 
 [[package]]
 name = "interatomic"
-version = "0.6.1"
-source = "git+https://github.com/mlund/interatomic.git#929afdeb39975900a2c293dc72a43f577df4c960"
+version = "0.7.0"
+source = "git+https://github.com/mlund/interatomic.git#3475ec7f117b8b979c4b6e674499980dcf7a76f9"
 dependencies = [
  "bytemuck",
  "coulomb",
@@ -2236,6 +2236,7 @@ dependencies = [
  "nalgebra 0.35.0",
  "num",
  "serde",
+ "thiserror 2.0.21",
  "wide 1.7.1",
 ]
 
