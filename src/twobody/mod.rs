@@ -331,17 +331,7 @@ impl TwobodyTab {
                         self.ui_angular_mesh(ui);
                         ui.end_row();
 
-                        ui.label("Cutoff");
-                        ui.add(
-                            egui::DragValue::new(&mut self.inputs.cutoff)
-                                .speed(1.0)
-                                .suffix(" \u{00C5}")
-                                .range(1.0..=500.0),
-                        )
-                        .on_hover_text(
-                            "Short-range pair potentials are splined out to this distance",
-                        );
-                        ui.end_row();
+                        self.ui_coulomb_cutoff(ui);
 
                         ui.label("Gradient threshold");
                         ui.add(
@@ -496,6 +486,27 @@ impl TwobodyTab {
                 },
             );
         }
+    }
+
+    /// Shown only for an opened scan that truncated Yukawa.
+    fn ui_coulomb_cutoff(&mut self, ui: &mut egui::Ui) {
+        let Some(cutoff) = self.inputs.coulomb_cutoff else {
+            return;
+        };
+        let tip = "From the opened scan: Yukawa is shifted to zero here, so Run reproduces it";
+        row(ui, "Coulomb cutoff", tip, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("{cutoff:.1} \u{00C5}"));
+                let clear = ui.add(egui::Button::new("↺").small());
+                if clear
+                    .on_hover_text("Scan with the full, untruncated Yukawa")
+                    .clicked()
+                {
+                    self.inputs.coulomb_cutoff = None;
+                }
+            })
+            .response
+        });
     }
 
     /// How the orientation mesh subdivides; two grid cells.

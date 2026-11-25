@@ -246,7 +246,7 @@ fn save(results: Results, trajectory: Option<Cow<[u8]>>, kind: Download) -> anyh
     let (bytes, name): (Cow<[u8]>, _) = match kind {
         Download::Curve => (results.report_csv().into_bytes().into(), "manybody.csv"),
         Download::PairCorrelation => {
-            let csv = results.rdf().to_csv();
+            let csv = results.rdf_analysis().to_csv();
             (csv.into_bytes().into(), "manybody.rdf.csv")
         }
         Download::Trajectory => match trajectory {

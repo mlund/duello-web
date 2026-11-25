@@ -16,8 +16,9 @@ pub struct ScanInputs {
     pub max_ndiv: usize,
     pub subdivision: Subdivision,
     pub gradient_threshold: f64,
-    pub cutoff: f64,
     pub grid_size: usize,
+    /// Kept from an opened CLI scan so a rerun matches it; the web sets none.
+    pub coulomb_cutoff: Option<f64>,
     /// Scan on precomputed short-range maps (fast, slightly biased near
     /// contact) rather than summing exact pairs on the GPU.
     pub use_grid: bool,
@@ -46,10 +47,10 @@ impl ScanInputs {
             temperature: conditions.temperature,
             max_ndiv: self.max_ndiv,
             gradient_threshold: self.gradient_threshold,
-            cutoff: self.cutoff,
             grid_size: self.grid_size,
             homo_dimer: false,
             subdivision: self.subdivision,
+            coulomb_cutoff: self.coulomb_cutoff,
         }
     }
 
@@ -78,8 +79,8 @@ impl ScanInputs {
         self.max_ndiv = s.max_ndiv;
         self.subdivision = s.subdivision;
         self.gradient_threshold = s.gradient_threshold;
-        self.cutoff = s.cutoff;
         self.grid_size = s.grid_size;
+        self.coulomb_cutoff = s.coulomb_cutoff;
     }
 }
 
@@ -93,8 +94,8 @@ impl Default for ScanInputs {
             max_ndiv: 2,
             subdivision: Subdivision::default(),
             gradient_threshold: 0.5,
-            cutoff: 20.0,
             grid_size: 200,
+            coulomb_cutoff: None,
             use_grid: true,
             grid: GridSpec::default(),
             normaliser: Normaliser::default(),
@@ -196,6 +197,7 @@ mod tests {
         let inputs = ScanInputs {
             subdivision: Subdivision::Lattice,
             rmax: 80.0,
+            coulomb_cutoff: Some(12.0),
             ..Default::default()
         };
         let conditions = conditions();
@@ -203,8 +205,8 @@ mod tests {
         let mut restored = ScanInputs::default();
         restored.adopt_settings(&settings);
         assert_eq!(
-            (restored.subdivision, restored.rmax),
-            (Subdivision::Lattice, 80.0)
+            (restored.subdivision, restored.rmax, restored.coulomb_cutoff),
+            (Subdivision::Lattice, 80.0, Some(12.0))
         );
         let mut adopted = SolutionConditions::default();
         adopted.adopt(&settings);
